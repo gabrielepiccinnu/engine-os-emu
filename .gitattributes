@@ -1,0 +1,12 @@
+# The toolchain runs inside WSL2 or Linux, in most cases reading the working
+# tree straight off a Windows drive through /mnt. With core.autocrlf=true a
+# checkout on Windows would rewrite the shell scripts with CRLF endings and
+# bash would fail on the shebang itself: "$'\r': command not found".
+# Force LF for everything that is executed, regardless of local git config.
+* text=auto eol=lf
+
+# PowerShell is the exception: it is launched from Windows, not from the guest.
+*.ps1 text eol=crlf
+
+# Never touched.
+*.png binary
