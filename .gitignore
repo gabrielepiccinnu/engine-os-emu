@@ -25,3 +25,7 @@ id_vm.pub
 # Local scratch
 *.log
 *.tmp
+__pycache__/
+
+# Local tooling config, not part of the project
+.claude/
