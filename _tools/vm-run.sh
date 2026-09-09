@@ -39,10 +39,35 @@ BASE="$(cd "$(dirname "$0")/.." && pwd)"
 VM="$BASE/_vm"
 KV=6.1.0-50-armmp
 MON=/tmp/qmon
+
+# Tunables, for comparing configurations without editing this file.
+#   SMP=8 bash vm-run.sh     more vCPUs: llvmpipe runs one rasterizer thread
+#                            per guest CPU, so this is what parallelises the
+#                            drawing. Needs a matching virt-inmusic$SMP.dtb,
+#                            because the DTB describes the CPUs AND the RAM.
+#   MEM=3072 bash vm-run.sh  guest RAM (same DTB caveat)
+#   TB=512 bash vm-run.sh    TCG translation block cache, in MiB
+#   CACHE=unsafe bash vm-run.sh   ignore guest flushes: faster, but a crash can
+#                            leave the filesystem broken
+#   XRES=640 YRES=400 bash vm-run.sh   the virtio-gpu preferred mode, which is
+#                            what Qt picks. Rasterisation is ~95% of the guest's
+#                            CPU time and scales with the pixel count, so this
+#                            trades resolution for frame rate directly. Keep the
+#                            8:5 ratio of the 800x1280 panel.
+SMP="${SMP:-4}"
+MEM="${MEM:-2048}"
+TB="${TB:-}"
+CACHE_MODE="${CACHE:-}"
+GPUOPT=""
+[ -n "${XRES:-}" ] && GPUOPT="$GPUOPT,xres=$XRES"
+[ -n "${YRES:-}" ] && GPUOPT="$GPUOPT,yres=$YRES"
 # vm-build.sh already generates virt-inmusic.dtb with 4 CPUs; VMs built earlier
 # have the 4 CPU DTB in virt-inmusic4.dtb. Prefer that one when it exists.
 DTB="$VM/virt-inmusic.dtb"
 [ -f "$VM/virt-inmusic4.dtb" ] && DTB="$VM/virt-inmusic4.dtb"
+# a DTB built for this exact CPU count wins: booting -smp N against a DTB that
+# describes a different number of CPUs leaves the extra ones unused
+[ -f "$VM/virt-inmusic$SMP.dtb" ] && DTB="$VM/virt-inmusic$SMP.dtb"
 
 # Disk images: if vm-fastdisk.sh has copied them onto ext4 use those, otherwise
 # the ones on /mnt/d, which pay the 9p latency on every request.
@@ -57,6 +82,7 @@ if [ -f /opt/az01-vm/rootfs-vm.img ]; then
     CACHE="cache=unsafe,aio=threads"
     echo "disks: $IMG (ext4, cache=unsafe)"
 fi
+[ -n "$CACHE_MODE" ] && CACHE="cache=$CACHE_MODE,aio=threads"
 
 export DISPLAY="${DISPLAY:-:0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}"
@@ -71,7 +97,7 @@ FORCE_VNC=0
 FORCE_WEB=0
 FORCE_GTK=0
 USE_GL=0
-GPU=(-device virtio-gpu-device)
+GPU=(-device "virtio-gpu-device$GPUOPT")
 case "${1:-}" in
     --stop)  pkill -f qemu-system-arm; pkill -f websockify 2>/dev/null
              echo "VM stopped"; exit 0 ;;
@@ -110,11 +136,11 @@ if [ "$FORCE_GTK" = 1 ]; then
         # the x86 host instead of the emulated ARM CPU. Requires the
         # virtio_gpu_dri.so driver in the guest, which mesa-upgrade.sh installs.
         DISPLAY_OPT=(-display gtk,gl=on,zoom-to-fit=on)
-        GPU=(-device virtio-gpu-gl-device)
+        GPU=(-device "virtio-gpu-gl-device$GPUOPT")
         echo "display: native window with virgl (rendering on the host)"
     else
         DISPLAY_OPT=(-display gtk,gl=off,zoom-to-fit=on)
-        GPU=(-device virtio-gpu-device)
+        GPU=(-device "virtio-gpu-device$GPUOPT")
         echo "display: native QEMU window on the desktop"
     fi
 elif [ "$FORCE_WEB" = 1 ]; then
@@ -148,8 +174,9 @@ QEMU=(qemu-system-arm
   # virtio-mmio transport does not offer VIRTIO_F_VERSION_1 and the devices end
   # up in state FAILED (0x83). In modern mode they all move to 0x0f.
   -global virtio-mmio.force-legacy=false
-  # 4 CPUs: Engine assumes the RK3288 quad core for IRQ affinity
-  -M virt -cpu cortex-a15 -smp 4 -m 2048
+  # at least 4 CPUs: Engine assumes the RK3288 quad core for IRQ affinity
+  -M virt -cpu cortex-a15 -smp "$SMP" -m "$MEM"
+  ${TB:+-accel tcg,tb-size=$TB}
   -dtb "$DTB"
   -kernel "$VM/kdeb/boot/vmlinuz-$KV" -initrd "$VM/initrd.img"
   -append "root=/dev/vda rw console=ttyAMA0 console=tty1 rootwait systemd.show_status=1"
