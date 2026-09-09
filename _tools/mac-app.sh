@@ -58,7 +58,10 @@ cd "$REPO" 2>/dev/null || fail "The repository is no longer at:\n$REPO\n\nRebuil
 command -v qemu-system-arm > /dev/null || fail "qemu-system-arm was not found.\n\nInstall it with:  brew install qemu"
 [ -f "$REPO/_vm/rootfs-vm.img" ] || fail "No VM images in _vm.\n\nBuild them first, then:  bash docker/eos.sh export"
 
-VIEW="vnc://localhost:5903"
+# The password is in the URL on purpose: Screen Sharing refuses a VNC server
+# that offers no authentication, and prompts for credentials nothing can
+# satisfy. See the note in vm-run-macos.sh.
+VIEW="vnc://:${VNC_PASSWORD:-engineos}@localhost:5903"
 
 vssh() {
     ssh -p 2222 -i /tmp/id_vm_macos -o StrictHostKeyChecking=no \

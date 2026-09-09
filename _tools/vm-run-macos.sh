@@ -23,6 +23,15 @@
 #     bash _tools/vm-run-macos.sh
 #     bash _tools/engine-run.sh     starts Engine, over SSH, as usual
 #
+# WHY THE VNC SERVER HAS A PASSWORD
+# QEMU with no password offers exactly one security type, "None". Apple's
+# Screen Sharing will not use it: it asks for a password for "localhost" that
+# nothing can satisfy, on every connection. Offering VNC authentication instead
+# is what makes that client work, so a password is set through the monitor
+# after startup. It guards a socket bound to 127.0.0.1, so it is there to
+# satisfy the client rather than to protect anything; VNC authentication is
+# DES based and takes 8 characters at most. Override it with VNC_PASSWORD.
+#
 # WHY NOT THE COCOA WINDOW BY DEFAULT
 # The virtio-gpu kernel driver takes its preferred mode from the size the host
 # reports for the display, and Qt EGLFS picks the preferred one. Under
@@ -66,8 +75,10 @@ vssh() {
         -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR root@127.0.0.1 "$@"
 }
 
-DISPLAY_OPT=(-vnc 127.0.0.1:3)
-VIEW="vnc://localhost:5903"
+VNC_PASSWORD="${VNC_PASSWORD:-engineos}"
+DISPLAY_OPT=(-vnc 127.0.0.1:3,password=on)
+# The password goes in the URL, so Screen Sharing opens without prompting.
+VIEW="vnc://:$VNC_PASSWORD@localhost:5903"
 if [ "${1:-}" = "--cocoa" ]; then
     # zoom-to-fit: the panel is 800x1280 in portrait and the window is rotated
     DISPLAY_OPT=(-display cocoa,zoom-to-fit=on)
@@ -129,7 +140,21 @@ fi
 nohup "${QEMU[@]}" > /tmp/qemu-macos.log 2>&1 < /dev/null &
 sleep 3
 if pgrep -f 'qemu-system-arm -global' > /dev/null; then
-    echo "VM started. Watch it at: $VIEW"
+    if [ "${DISPLAY_OPT[0]}" = "-vnc" ]; then
+        # set_password needs the monitor, which is only up once QEMU is
+        # running, hence here rather than on the command line
+        python3 -c "
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect('$MON'); time.sleep(0.5)
+try: s.recv(65536)
+except Exception: pass
+s.sendall(('set_password vnc %s\n' % sys.argv[1]).encode()); time.sleep(0.5)" \
+            "$VNC_PASSWORD" 2>/dev/null || echo "  (could not set the VNC password)"
+        echo "VM started. Watch it at:  open '$VIEW'"
+        echo "  VNC password: $VNC_PASSWORD"
+    else
+        echo "VM started. Watch it at: $VIEW"
+    fi
 else
     echo "STARTUP FAILED:"; tail -n 8 /tmp/qemu-macos.log; exit 1
 fi

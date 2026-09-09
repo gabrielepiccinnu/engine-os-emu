@@ -44,6 +44,10 @@ FW_URL=https://public.inmusiccdn.com/Engine/5.0.4/RELEASE/48fd65b16041710b/MIXST
 FW_SHA=e642aaa686138d25a4e192b4afcdb51f1730d601ef8807bd4dfafadc40d6e995
 
 NOVNC_URL="http://localhost:6080/vnc.html?autoconnect=true&resize=scale"
+# Apple's Screen Sharing refuses a VNC server that offers no authentication,
+# and QEMU in the container has none, so this address wants a client that
+# accepts it. The browser above always works, and _tools/vm-run-macos.sh is the
+# better answer on macOS anyway: it runs QEMU on the host, with a password set.
 VNC_URL="vnc://localhost:5902"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
@@ -121,7 +125,7 @@ cmd_boot() {
     dex pkill -f 'TCP-LISTEN:5902' 2> /dev/null || true
     dex sh -c 'setsid socat TCP-LISTEN:5902,fork,reuseaddr TCP:127.0.0.1:5901 > /dev/null 2>&1 < /dev/null &' || true
     echo "  browser:  $NOVNC_URL"
-    echo "  VNC:      $VNC_URL"
+    echo "  VNC:      $VNC_URL   (needs a client that accepts an unauthenticated server)"
     say "waiting for the guest (4-5 minutes under TCG)"
     dex bash /work/_tools/vm-wait.sh 15
 }

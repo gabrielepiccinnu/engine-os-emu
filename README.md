@@ -113,10 +113,18 @@ the host and the browser out of the loop entirely:
 ```bash
 brew install qemu
 bash docker/eos.sh export        # copies the artifacts out of the Docker volumes
-bash _tools/vm-run-macos.sh      # VNC on 127.0.0.1:5903
-open vnc://localhost:5903        # Screen Sharing
-bash _tools/engine-run.sh        # as usual, over SSH
+bash _tools/vm-run-macos.sh          # VNC on 127.0.0.1:5903
+open vnc://:engineos@localhost:5903  # Screen Sharing
+bash _tools/engine-run.sh            # as usual, over SSH
 ```
+
+The VNC server has a password, and it is in that URL. QEMU with no password
+offers exactly one security type, "None", and Apple's Screen Sharing will not use it: it asks for
+a password for "localhost" that nothing can satisfy, on every connection. Offering VNC
+authentication instead is what makes that client work. It guards a socket bound to 127.0.0.1, so
+it is there to satisfy the client rather than to protect anything, and VNC authentication is DES
+based and takes 8 characters at most. `VNC_PASSWORD` overrides it. The same is true of the
+container's `vnc://localhost:5902`, which has no password set: there the browser is the viewer.
 
 `engine-run.sh` reuses the armhf shims the build left in `_vm` when there is no cross compiler,
 so it works unchanged on the host.
