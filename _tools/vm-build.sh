@@ -61,8 +61,10 @@ for a in sh mount umount insmod switch_root mkdir sleep ls cat echo; do
 done
 : > modorder.txt
 for M in ext4 virtio_mmio virtio_blk virtio_net virtio_input virtio_console; do
+    # --show-depends appends the module parameters after the path on kmod >= 31
+    # ("insmod .../virtio_net.ko disable_csum=1"): keep only the path.
     modprobe -d kdeb -S "$KV" --show-depends --ignore-install "$M" 2>/dev/null \
-        | sed -n 's/^insmod //p' | sed 's/[[:space:]]*$//' >> modorder.txt
+        | sed -n 's/^insmod \([^ ]*\).*/\1/p' >> modorder.txt
 done
 awk '!seen[$0]++' modorder.txt > modorder.tmp && mv modorder.tmp modorder.txt
 i=0
@@ -115,6 +117,9 @@ python3 - "$VM/virt.dts" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
 if 'inmusic,product-code' not in s:
+    # QEMU >= 9 already emits a root "model" property. Ours replaces it: with
+    # both present dtc refuses the tree ("Duplicate property name").
+    s = s.replace('\tmodel = "linux,dummy-virt";\n', '', 1)
     s = s.replace('compatible = "linux,dummy-virt";',
         'compatible = "inmusic,nh08", "inmusic,az05", "linux,dummy-virt";\n'
         '\tmodel = "Numark MIXSTREAM PRO (QEMU)";\n'
