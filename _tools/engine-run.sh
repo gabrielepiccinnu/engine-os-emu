@@ -67,6 +67,11 @@ scp -P 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev
 scp -P 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR /tmp/uinput-touch root@127.0.0.1:/tmp/uinput-touch.new > /dev/null
 
+# EXTRA_ENV="LP_NUM_THREADS=2" bash engine-run.sh -> extra environment for the
+# Engine process. Rasterisation is ~95% of the guest's CPU time, so this is
+# where the llvmpipe knobs (LP_*, MESA_*) can be tried out.
+EXTRA_ENV="${EXTRA_ENV:-}"
+
 # QT_DEBUG_INPUT=1 bash engine-run.sh -> qt.qpa.input logging in /tmp/engine.log
 QTRULES=""
 [ -n "${QT_DEBUG_INPUT:-}" ] && QTRULES="qt.qpa.input=true"
@@ -84,7 +89,8 @@ if [ -n "${MESA24:-}" ]; then
 fi
 
 echo "== preparing the guest and starting Engine =="
-ssh $SSHOPT root@127.0.0.1 QTRULES="$QTRULES" QTLIB="$QTLIB" MESAENV="$MESAENV" 'sh -s' <<'GUEST'
+ssh $SSHOPT root@127.0.0.1 QTRULES="$QTRULES" QTLIB="$QTLIB" MESAENV="$MESAENV" \
+    EXTRA_ENV="$EXTRA_ENV" 'sh -s' <<'GUEST'
 killall Engine 2>/dev/null
 sleep 2
 
@@ -109,7 +115,12 @@ if ! mountpoint -q /media/az01-internal 2>/dev/null; then
 fi
 
 # 3. release the DRM master
+# The unit autologs into an interactive shell, and that shell ignores SIGTERM:
+# a plain "stop" therefore blocks until systemd's stop timeout expires, which
+# under emulation is minutes of dead time on the first run after a boot.
+# SIGKILL the cgroup first, so the stop finds nothing left alive.
 systemctl mask getty@tty1 2>/dev/null
+systemctl kill -s KILL getty@tty1 2>/dev/null
 systemctl stop getty@tty1 2>/dev/null
 sleep 2
 for v in /sys/class/vtconsole/*/; do
@@ -150,7 +161,7 @@ rm -rf /tmp/EngineOS
 
 # 5. LD_PRELOAD carrying the pixel format rewrite
 setsid sh -c "LD_PRELOAD=/tmp/drmspy.so LD_LIBRARY_PATH=$QTLIB \
-    QT_LOGGING_RULES='$QTRULES' $MESAENV \
+    QT_LOGGING_RULES='$QTRULES' $MESAENV $EXTRA_ENV \
     QT_QPA_PLATFORM=eglfs /usr/Engine/Engine -d0 > /tmp/engine.log 2>&1" < /dev/null &
 echo "Engine started"
 GUEST
