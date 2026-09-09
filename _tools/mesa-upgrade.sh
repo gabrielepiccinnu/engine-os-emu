@@ -30,7 +30,15 @@ PORTS=http://ports.ubuntu.com/ubuntu-ports
 # index has to be used: the pool contains ALL releases together, and simply
 # taking the highest version pulls in packages from later Ubuntu releases that
 # demand GLIBC_2.42 and will not load.
-SUITES="noble noble-updates noble-security"
+#
+# ONLY the release pocket, deliberately. noble shipped Mesa 24.0.5, the same
+# series as the 24.0.7 in the rootfs, but noble-updates has since moved to the
+# 25.x HWE stack. From 24.3 on, Mesa replaced the classic DRI megadriver
+# (libgallium_dri.so) with libdril_dri.so, and the guest's own libEGL/libgbm
+# cannot bind its entry points: Engine then dies at startup with
+#   did not find extension DRI_Mesa version 1 / failed to bind extensions
+#   Could not create GBM device / Could not open DRM device
+SUITES="noble"
 
 cp -f "$VM/id_vm" /tmp/id_vm; chmod 600 /tmp/id_vm
 SSHOPT="-p 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o LogLevel=ERROR"
@@ -42,7 +50,7 @@ mkdir -p "$WORK/deb" "$WORK/root"
 cd "$WORK/deb"
 
 echo "== Ubuntu 24.04 armhf package index =="
-INDEX="$WORK/Packages.noble"
+INDEX="$WORK/Packages.$(echo $SUITES | tr ' ' '-')"
 if [ ! -s "$INDEX" ]; then
     : > "$INDEX"
     for su in $SUITES; do
@@ -82,6 +90,13 @@ for p in $PKGS; do grab_pkg "$p" || true; done
 DRI=$(find "$WORK/root" -name 'virtio_gpu_dri.so' -o -name 'kms_swrast_dri.so' | head -n 1)
 if [ -z "$DRI" ]; then echo "extraction failed: no DRI driver"; exit 1; fi
 DRIDIR=$(dirname "$DRI")
+# Mesa >= 24.3 points every *_dri.so at libdril_dri.so, whose ABI the guest's
+# libEGL cannot bind. Stop here rather than let Engine fail at startup.
+if [ "$(basename "$(readlink -f "$DRI")")" = "libdril_dri.so" ]; then
+    echo "the index yielded Mesa >= 24.3 (libdril_dri.so): incompatible with" >&2
+    echo "the guest's Mesa 24.0. Keep SUITES on the release pocket only." >&2
+    exit 1
+fi
 LIBDIR=$(dirname "$(find "$WORK/root" -name 'libLLVM*.so*' | head -n 1)")
 echo "  drivers in $DRIDIR"
 echo "  libraries in ${LIBDIR:-none}"
@@ -100,6 +115,42 @@ find "$WORK/root" -path '*/lib/*' \( -type f -o -type l \) -name '*.so*' \
     -not -path '*/dri/*' -exec cp -a {} "$STAGE/lib/" \; 2>/dev/null
 du -sh "$STAGE" | sed 's/^/  /'
 ls "$STAGE/lib" | wc -l | sed 's/^/  libraries: /'
+
+echo "== aligning the Mesa build string with the guest =="
+# The guest's libEGL refuses any driver whose Mesa build string is not byte for
+# byte its own:
+#   DRI driver not from this Mesa build ('24.0.5-1ubuntu1' vs '24.0.7')
+#   failed to bind extensions / Could not create GBM device
+# (the __DRI_MESA extension, added in Mesa 24.0, is compared with strcmp). The
+# distributions stamp the full package version into that string, so an archive
+# build can never match a Yocto one: noble carries "24.0.5-1ubuntu1" against
+# the rootfs's plain "24.0.7", and no Ubuntu release ever shipped 24.0.7.
+#
+# The string is rewritten in place instead, same length, NUL padded. What the
+# check really guards is the DRI interface, and that does not change between
+# maintenance releases of one stable series: only the last digit differs here.
+GUESTVER=$(ssh $SSHOPT root@127.0.0.1 \
+    'strings /usr/lib/libEGL.so.1 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | sort -u | head -n 1' \
+    | tr -d '\r')
+# the build string occurs several times: take the most frequent match, not the
+# first, so an unrelated version-looking string cannot be picked up
+DRIVERVER=$(strings "$STAGE/dri/virtio_gpu_dri.so" \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort | uniq -c | sort -rn \
+    | head -n 1 | sed 's/^ *[0-9]* //')
+echo "  guest libEGL: ${GUESTVER:-?}    sideloaded driver: ${DRIVERVER:-?}"
+if [ -n "$GUESTVER" ] && [ -n "$DRIVERVER" ] && [ "$GUESTVER" != "$DRIVERVER" ]; then
+    python3 - "$STAGE/dri" "$DRIVERVER" "$GUESTVER" <<'MESAVER'
+import glob, os, sys
+d, old, new = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
+if len(new) > len(old):
+    sys.exit("  the guest string is the longer one: cannot rewrite in place")
+new += b"\0" * (len(old) - len(new))
+for f in sorted(glob.glob(os.path.join(d, "*.so"))):
+    blob = open(f, "rb").read()
+    print("  %s: %d occurrences" % (os.path.basename(f), blob.count(old)))
+    open(f, "wb").write(blob.replace(old, new))
+MESAVER
+fi
 
 echo "== copying into the guest under /opt/mesa24 =="
 tar -C "$STAGE" -czf /tmp/mesa24.tgz .
