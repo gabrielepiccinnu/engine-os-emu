@@ -68,6 +68,10 @@ GPUOPT=",xres=${XRES:-1280},yres=${YRES:-800},edid=off"
 
 DTB="$VM/virt-inmusic.dtb"
 [ -f "$VM/virt-inmusic$SMP.dtb" ] && DTB="$VM/virt-inmusic$SMP.dtb"
+# DTB=... to boot a different device tree. Engine takes its whole product
+# identity from inmusic,product-code in there, so this is what selects which
+# product it believes it is running on.
+[ -n "${DTB_OVERRIDE:-}" ] && DTB="$DTB_OVERRIDE"
 
 vssh() {
     cp -f "$VM/id_vm" /tmp/id_vm_macos 2>/dev/null; chmod 600 /tmp/id_vm_macos
