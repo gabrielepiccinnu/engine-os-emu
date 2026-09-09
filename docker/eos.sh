@@ -13,6 +13,8 @@
 #     build     build the armhf VM (kernel, initrd, disks, DTB, SSH key)
 #     mesa      sideload the Mesa 24 drivers (llvmpipe: ~5x the frame rate)
 #     boot      boot the VM and wait for the guest to answer over SSH
+#     export    copy the built artifacts out of the volumes into _vm, so QEMU
+#               can run on the host (see _tools/vm-run-macos.sh)
 #     engine    start the Engine DJ application inside the VM
 #     view      open the browser on noVNC
 #     shot [f]  capture the screen to a PNG on the host
@@ -143,6 +145,20 @@ cmd_engine() {
     fi
 }
 
+cmd_export() {
+    need_up
+    say "copying the artifacts into $REPO/_vm"
+    dex pgrep -x qemu-system-arm > /dev/null 2>&1 && \
+        die "stop the VM first, or the disk images are copied mid-write: bash docker/eos.sh stop"
+    # tar -S keeps the holes: the three images are 5 GiB apparent, about 1 GiB real
+    dex tar -cS -C /work/_vm -f - \
+        rootfs-vm.img data.img media.img initrd.img virt-inmusic.dtb \
+        id_vm id_vm.pub drmspy.so uinput-touch | tar -x -C "$REPO/_vm"
+    docker cp "$NAME:/work/_vm/kdeb/boot/vmlinuz-6.1.0-50-armmp" "$REPO/_vm/"
+    du -sh "$REPO/_vm" | sed 's/^/  /'
+    echo "now: bash _tools/vm-run-macos.sh"
+}
+
 cmd_view()  { command -v open > /dev/null && open "$NOVNC_URL" || echo "$NOVNC_URL"; }
 cmd_log()   { need_up; dex tail -f /work/_vm/boot.log; }
 cmd_applog(){ need_up; dex bash /work/_tools/vm-run.sh --ssh tail -f /tmp/engine.log; }
@@ -195,7 +211,7 @@ MSG
 }
 
 case "${1:-help}" in
-    fetch|image|up|extract|build|mesa|boot|engine|view|log|applog|shell|shot|stop|down|clean|status|all)
+    fetch|image|up|extract|build|mesa|boot|engine|export|view|log|applog|shell|shot|stop|down|clean|status|all)
         c="$1"; shift; "cmd_$c" "$@" ;;
     vssh) shift; cmd_vssh "$@" ;;
     *)    sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d' ;;

@@ -101,9 +101,38 @@ builds the VM, boots it, and starts Engine. Individual steps (`fetch`, `image`, 
 `build`, `boot`, `engine`, `shot`, `vssh`, `status`, `stop`, `clean`) can be run on their own;
 `bash docker/eos.sh` with no argument lists them.
 
-There is no X11, so the display is VNC: the browser at
+There is no X11 in the container, so the display is VNC: the browser at
 `http://localhost:6080/vnc.html?autoconnect=true&resize=scale`, or a native client at
 `vnc://localhost:5902` (on macOS, Screen Sharing), which is the more responsive of the two.
+
+### Running QEMU on the host instead
+
+The container is only needed to *build*. Running the VM wants nothing from it, so QEMU can go on
+the host and the browser out of the loop entirely:
+
+```bash
+brew install qemu
+bash docker/eos.sh export        # copies the artifacts out of the Docker volumes
+bash _tools/vm-run-macos.sh      # VNC on 127.0.0.1:5903
+open vnc://localhost:5903        # Screen Sharing
+bash _tools/engine-run.sh        # as usual, over SSH
+```
+
+`engine-run.sh` reuses the armhf shims the build left in `_vm` when there is no cross compiler,
+so it works unchanged on the host.
+
+This is not faster. Measured at the device resolution it lands on 193 frames against the
+container's 191 to 209, so the Docker VM layer costs nothing worth measuring; what it removes is
+the encode, websocket and canvas redraw on every frame, which is the part that actually feels
+slow at 3 fps.
+
+`--cocoa` runs QEMU's own window instead, and is the obvious thing to want, but on a Retina
+screen the guest comes up at 640x400 whatever mode is asked for. The virtio-gpu driver takes its
+preferred mode from the size the host reports for the display, Qt EGLFS picks the preferred one,
+and QEMU's Cocoa UI reports the window in points rather than pixels, so a 2x screen halves it.
+The framebuffer console still shows the full size, which makes it easy to miss. `edid=off` does
+not help, and neither does asking for a doubled mode. Over VNC nothing reports a display size,
+the guest keeps 1280x800, and the interface is whole.
 
 `_extracted` and `_vm` are kept in Docker volumes rather than on the bind mount. QEMU does
 scattered small block I/O and every request would otherwise pay a VirtioFS round trip: the same
@@ -245,6 +274,7 @@ Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
 | `_tools/ppm2png.py` | converts QEMU monitor screendumps to PNG |
 | `docker/Dockerfile` | Linux toolchain image: QEMU, armhf cross compiler, noVNC |
 | `docker/eos.sh` | drives the whole pipeline inside that container, from a non-Linux host |
+| `_tools/vm-run-macos.sh` | runs the VM with QEMU on a macOS host, no container in the loop |
 
 ## Credits
 
