@@ -52,14 +52,21 @@ TOOLS="$BASE/_tools"
 cp -f "$VM/id_vm" /tmp/id_vm; chmod 600 /tmp/id_vm
 SSHOPT="-p 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o LogLevel=ERROR"
 
-echo "== building the DRM shim for armhf =="
-if ! command -v arm-linux-gnueabihf-gcc > /dev/null; then
-    echo "cross compiler missing: apt-get install -y gcc-arm-linux-gnueabihf" >&2
+if command -v arm-linux-gnueabihf-gcc > /dev/null; then
+    echo "== building the DRM shim for armhf =="
+    arm-linux-gnueabihf-gcc -shared -fPIC -O2 -w -o /tmp/drmspy.so "$TOOLS/drmspy.c" -ldl
+    arm-linux-gnueabihf-gcc -O2 -w -o /tmp/uinput-touch "$TOOLS/uinput-touch.c"
+    cp -f /tmp/drmspy.so /tmp/uinput-touch "$VM/"
+elif [ -f "$VM/drmspy.so" ] && [ -f "$VM/uinput-touch" ]; then
+    # No cross compiler, which is the normal case when QEMU runs natively on a
+    # macOS host: reuse the binaries the build left in _vm.
+    echo "== reusing the armhf shims from _vm =="
+    cp -f "$VM/drmspy.so" "$VM/uinput-touch" /tmp/
+else
+    echo "no cross compiler and no prebuilt shims in $VM" >&2
+    echo "install gcc-arm-linux-gnueabihf, or run docker/eos.sh export" >&2
     exit 1
 fi
-arm-linux-gnueabihf-gcc -shared -fPIC -O2 -w -o /tmp/drmspy.so "$TOOLS/drmspy.c" -ldl
-arm-linux-gnueabihf-gcc -O2 -w -o /tmp/uinput-touch "$TOOLS/uinput-touch.c"
-cp -f /tmp/drmspy.so /tmp/uinput-touch "$VM/"
 scp -P 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR /tmp/drmspy.so root@127.0.0.1:/tmp/drmspy.so > /dev/null
 # if the bridge is already running the file is busy (ETXTBSY): copy it
