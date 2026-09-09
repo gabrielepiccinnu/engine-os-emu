@@ -121,6 +121,12 @@ bash _tools/engine-run.sh        # as usual, over SSH
 `engine-run.sh` reuses the armhf shims the build left in `_vm` when there is no cross compiler,
 so it works unchanged on the host.
 
+For something to double click, `bash _tools/mac-app.sh` builds `Engine OS.app` around exactly
+those scripts, with no logic of its own. It starts the VM, waits for the guest, opens the viewer
+and starts Engine, reporting each step as a notification because an app launched from Finder has
+nowhere to print. Launching it again is safe: it checks whether the VM is up and whether Engine
+is still alive, and does only what is missing.
+
 This is not faster. Measured at the device resolution it lands on 193 frames against the
 container's 191 to 209, so the Docker VM layer costs nothing worth measuring; what it removes is
 the encode, websocket and canvas redraw on every frame, which is the part that actually feels
@@ -275,6 +281,7 @@ Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
 | `docker/Dockerfile` | Linux toolchain image: QEMU, armhf cross compiler, noVNC |
 | `docker/eos.sh` | drives the whole pipeline inside that container, from a non-Linux host |
 | `_tools/vm-run-macos.sh` | runs the VM with QEMU on a macOS host, no container in the loop |
+| `_tools/mac-app.sh` | builds a double-clickable Engine OS.app around those scripts |
 
 ## Credits
 
