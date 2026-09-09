@@ -290,6 +290,8 @@ Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
 | `docker/eos.sh` | drives the whole pipeline inside that container, from a non-Linux host |
 | `_tools/vm-run-macos.sh` | runs the VM with QEMU on a macOS host, no container in the loop |
 | `_tools/mac-app.sh` | builds a double-clickable Engine OS.app around those scripts |
+| `_tools/snd-combined.c` | virtual ALSA card with playback, capture and MIDI on one card, which is the shape Engine looks for |
+| `_tools/snd-combined-build.sh` | cross builds that module against the guest kernel |
 
 ## Credits
 

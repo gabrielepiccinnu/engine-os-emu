@@ -787,7 +787,7 @@ motors, the ilitek touchscreen: these are physical circuits of the Mixstream Pro
 
 | Subsystem | Why |
 |---|---|
-| Audio | custom I2S codec `eta5805`/`inmusic-nh08` on a physical bus, separate XMOS DSP |
+| Audio | custom I2S codec `eta5805`/`inmusic-nh08` on a physical bus, separate XMOS DSP. Engine will however open an unrelated ALSA card of the right shape, see section 12 |
 | Control surface | MIDI over UART `ff190000` to dedicated MCUs |
 | Jog wheels, motors, pads | firmware on external microcontrollers |
 | Touchscreen | MIPI panel plus ilitek controller, firmware updated at boot |
@@ -824,6 +824,8 @@ screenshots.
 | `_tools/engine-bench.sh` | measures how fast Engine draws, by counting DRM page flips |
 | `_tools/vm-fastdisk.sh` | moves the disk images between the Windows and Linux filesystems |
 | `_tools/ppm2png.py` | converts QEMU monitor screendumps to PNG |
+| `_tools/snd-combined.c` | virtual ALSA card with playback, capture and MIDI on one card, which is the shape Engine looks for |
+| `_tools/snd-combined-build.sh` | cross builds that module against the guest kernel |
 
 Generated artifacts, for reference:
 
@@ -861,7 +863,134 @@ python _tools/splash2png.py _extracted/00_splash.bin _extracted/splash.png
 
 ---
 
-## 12. Note
+## 12. The audio device, and what the product code decides
+
+Section 10 says audio will never work, and for the device's own audio that stays true: the codec
+is a physical chip on a physical bus. What it did not say, because it was not known, is that
+Engine will happily open an audio device that has nothing to do with inMusic hardware, provided
+the device has the right *shape*. Finding that shape also uncovered how little of Engine is
+specific to any one product.
+
+### 12.1 One binary, all the products
+
+The Prime GO update image was extracted the same way as the Mixstream Pro one and the two
+applications compared:
+
+```
+e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa  Mixstream Pro  /usr/Engine/Engine
+e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa  Prime GO       /usr/Engine/Engine
+```
+
+The same 44,619,440 bytes. A console and a player, different hardware and different interfaces,
+run byte for byte the same executable.
+
+What tells them apart is small. Engine reads exactly four things out of the device tree:
+
+```
+/sys/firmware/devicetree/base/inmusic,product-code
+/sys/firmware/devicetree/base/inmusic,az01-pcb-rev
+/sys/firmware/devicetree/base/serial-number
+/sys/firmware/devicetree/base/mipi@ff960000/panel@0/rotation
+```
+
+Everything else about a product, its layout, its capabilities, the shape of its mixer, comes from
+a table inside that shared binary, keyed by the product code. Changing `inmusic,product-code` in
+the QEMU device tree is therefore enough to make Engine believe it is another machine, and it
+does not merely relabel itself: as `JP07` it comes up as the Prime GO's single deck player, with
+`Layer A`, performance pads and a `Player #` setting, instead of the Mixstream's two deck console.
+The kernel modules confirm the same design from the other side, one machine driver serving
+seventeen products, each with its own card name.
+
+### 12.2 What Engine looks for, and how it finds it
+
+With no sound card at all, Engine logs
+
+```
+[W] client id: 14 - card number unavailable        [air.devicemanager.midi.i]
+[W] Failed to fetch the audio device "" from the device manager
+ALSA lib control.c:1570:(snd_ctl_open_noupdate) Invalid CTL
+```
+
+The device name is empty, which is why the `snd_ctl_open` that follows fails. Two things in the
+binary explain it. The Linux backend is
+
+```
+airDeviceManager/src/audio/linux/alsa/ALSACombinedDevice.cpp
+```
+
+a *combined* device, playback and capture on one card, and the enumeration that precedes the
+failure belongs to `air.devicemanager.midi`: the device manager walks the ALSA sequencer clients
+and asks each one which card it belongs to. On the real unit the control surface and the codec
+are one composite device, so a MIDI client leads to the card that carries the audio.
+
+That is why a plain PCM card is not enough. `snd-aloop` was loaded, and renamed to the product
+code for good measure, and Engine still found nothing: no MIDI client belongs to it, so no card
+number is ever reached. `snd-virmidi` has the opposite problem. No in-tree driver offers both.
+
+### 12.3 Emulating the shape
+
+`_tools/snd-combined.c` supplies what is missing: one card with a PCM playback substream, a PCM
+capture substream and a rawmidi, the PCM driven by a timer and carrying no samples. Loaded in the
+guest it produces
+
+```
+0 [NH08           ]: Combined - NH08
+00-00: NH08 : NH08 : playback 1 : capture 1
+Client 16 : "NH08" [Kernel]
+```
+
+and Engine accepts it. Both substreams reach `state: RUNNING` owned by the Engine process, the
+audio device error disappears, and the interface that depends on audio appears: the mixer
+settings fill in, and a `MIC` tab shows up carrying Send to Speakers, Send to Headphones and a
+three band EQ.
+
+### 12.4 The card has to be big enough
+
+Engine validates what it opens, and the requirement is a product property. Offering a fixed
+channel count and watching whether the substreams open:
+
+| channels offered | NH08 (Mixstream Pro) | JP07 (Prime GO) |
+|---|---|---|
+| 2 | refused | - |
+| 8 | refused, Engine exits | accepted |
+| 10, 12, 16 | accepted | accepted |
+
+At 8 channels the NH08 profile fails with a critical `ALSADeviceEnumerator::scanDevices() Device
+initialization error` and the process ends. So the Mixstream Pro wants at least nine channels
+each way at 48 kHz, and the Prime GO eight. Offered a range instead of a fixed count Engine takes
+the maximum, so these are lower bounds rather than the exact figure the firmware would request of
+real hardware.
+
+### 12.5 No aux hides in the product table
+
+The interest in all this was whether an aux input could be reached from software, since the
+Mixstream Pro's own microphone input is mono and no use for a stereo source. The QML labels its
+tab conditionally,
+
+```qml
+const micTabTitle = Config.audio.hasAuxInput ? "Mic / Aux" : "Mic"
+```
+
+so the label answers the question directly. With a working card in each profile:
+
+| profile | Mic tab | label |
+|---|---|---|
+| NH08, Mixstream Pro | present | **MIC** |
+| JC16, same firmware image | present | **MIC** |
+| JP07, Prime GO | **absent** | - |
+
+The Prime GO, the one that does have an aux, exposes no Mic or Aux tab at all: its aux is an
+analogue path with its own control, not a software channel. No profile in this family reads
+`Mic / Aux`. Changing the product code does not unlock a stereo input, and that is a result
+rather than a gap in the search.
+
+The route that remains for adding channels is the one the device already offers, Computer Mode:
+the unit presents itself to a host over USB Audio Class 2, with a capture stream as well as a
+playback one, and the host is where the channel count stops being fixed by the firmware.
+
+---
+
+## 13. Note
 
 This analysis was carried out on firmware publicly distributed by inMusic, for a device owned by
 the author, for study and interoperability purposes. The application code (`Engine`, the QML, the
