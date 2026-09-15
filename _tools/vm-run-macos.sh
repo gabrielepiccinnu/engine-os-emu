@@ -146,10 +146,17 @@ sleep 3
 if pgrep -f 'qemu-system-arm -global' > /dev/null; then
     if [ "${DISPLAY_OPT[0]}" = "-vnc" ]; then
         # set_password needs the monitor, which is only up once QEMU is
-        # running, hence here rather than on the command line
+        # running, hence here rather than on the command line. The socket
+        # appears some seconds after the process does, later still on a cold
+        # start with the images not yet in the page cache, so keep trying.
         python3 -c "
 import socket, sys, time
-s = socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect('$MON'); time.sleep(0.5)
+s = socket.socket(socket.AF_UNIX); s.settimeout(10)
+for _ in range(30):
+    try: s.connect('$MON'); break
+    except OSError: time.sleep(1)
+else: sys.exit(1)
+time.sleep(0.5)
 try: s.recv(65536)
 except Exception: pass
 s.sendall(('set_password vnc %s\n' % sys.argv[1]).encode()); time.sleep(0.5)" \
