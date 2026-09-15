@@ -89,8 +89,10 @@ websocket and canvas redraw round trip on every frame.
 
 The steps above need a Linux host: loop devices to patch the rootfs image, an armhf cross
 compiler for the shims, and root. `docker/` packages all of that in a privileged Debian
-container, so the host only has to run Docker. On Apple Silicon the container itself is native
-arm64 and only the armhf guest is emulated.
+container, so the host only has to run Docker. Any daemon that allows privileged containers will
+do; `brew install colima docker && colima start --cpu 4 --memory 8` is enough and needs no
+administrator password. On Apple Silicon the container itself is native arm64 and only the armhf
+guest is emulated.
 
 ```bash
 bash docker/eos.sh all
