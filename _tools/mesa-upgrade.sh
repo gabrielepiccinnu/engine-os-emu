@@ -129,14 +129,19 @@ echo "== aligning the Mesa build string with the guest =="
 # The string is rewritten in place instead, same length, NUL padded. What the
 # check really guards is the DRI interface, and that does not change between
 # maintenance releases of one stable series: only the last digit differs here.
+#
+# Neither string can be found by grepping for "anything that looks like a
+# version". libEGL also carries "libEGL.so.1.0.0" and a debug path with the
+# version in it, and the driver's build string never appears on its own: the
+# linker tail-merges it into "%s24.0.5-1ubuntu1", "mesa24.0.5-1ubuntu1" and
+# "Mesa 24.0.5-1ubuntu1", so a "^version$" match finds only a stray one. The
+# guest's version is the only line that is a bare version; the driver's is
+# whatever follows "Mesa " in its GL_VERSION format string.
 GUESTVER=$(ssh $SSHOPT root@127.0.0.1 \
-    'strings /usr/lib/libEGL.so.1 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | sort -u | head -n 1' \
+    'strings /usr/lib/libEGL.so.1 2>/dev/null | grep -E "^[0-9]+\.[0-9]+\.[0-9]+[-0-9A-Za-z.~+]*$" | head -n 1' \
     | tr -d '\r')
-# the build string occurs several times: take the most frequent match, not the
-# first, so an unrelated version-looking string cannot be picked up
 DRIVERVER=$(strings "$STAGE/dri/virtio_gpu_dri.so" \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort | uniq -c | sort -rn \
-    | head -n 1 | sed 's/^ *[0-9]* //')
+    | grep -oE 'Mesa [0-9]+\.[0-9]+\.[0-9]+[-0-9A-Za-z.~+]*' | head -n 1 | cut -d' ' -f2)
 echo "  guest libEGL: ${GUESTVER:-?}    sideloaded driver: ${DRIVERVER:-?}"
 if [ -n "$GUESTVER" ] && [ -n "$DRIVERVER" ] && [ "$GUESTVER" != "$DRIVERVER" ]; then
     python3 - "$STAGE/dri" "$DRIVERVER" "$GUESTVER" <<'MESAVER'
