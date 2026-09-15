@@ -90,7 +90,10 @@ cmd_up() {
     docker volume create "$VOL_VM" > /dev/null
     docker volume create "$VOL_EX" > /dev/null
     # --privileged: vm-build.sh needs loop devices to mount the rootfs image.
-    docker run -d --name "$NAME" --privileged \
+    # --init: PID 1 is otherwise "sleep infinity", which never reaps orphans, so
+    # a stopped QEMU stays as a zombie that pgrep still finds and "export"
+    # refuses to run.
+    docker run -d --name "$NAME" --privileged --init \
         -v "$REPO":/work \
         -v "$VOL_VM":/work/_vm \
         -v "$VOL_EX":/work/_extracted \
