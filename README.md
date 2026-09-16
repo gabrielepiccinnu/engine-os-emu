@@ -137,6 +137,31 @@ and starts Engine, reporting each step as a notification because an app launched
 nowhere to print. Launching it again is safe: it checks whether the VM is up and whether Engine
 is still alive, and does only what is missing.
 
+### Sharing a folder from the Mac
+
+Music otherwise has to be copied into `media.img`, the FAT32 image Engine sees as its
+`ENGINEOS` drive. A folder on the host can be handed to the guest instead, live:
+
+```bash
+SHARE=~/Music/DJ bash _tools/vm-run-macos.sh      # virtio-9p, mount tag "share"
+MESA24=1 SHARE_NAME=Music bash _tools/engine-run.sh
+SHARE=~/Music/DJ bash _tools/mac-app.sh           # or bake it into the app
+```
+
+The folder appears in Engine's **Folder** view as `ENGINEOS > Music`, and files added on the
+Mac while Engine runs show up on the next visit to the folder, since 9p reads through to the
+host on every access. Engine keeps its database on `media.img`, as before.
+
+It is a folder inside the ENGINEOS drive rather than a source of its own, and that is not a
+shortcut. Engine does not look at the filesystem for its sources: it asks `edisksd` over
+D-Bus, and `edisksd` enumerates block devices that udev has labelled with a filesystem, so a
+9p mount is invisible to it. `engine-run.sh` therefore bind-mounts the share into
+`/media/ENGINEOS` once `edisksd` has mounted that drive. QEMU's `vvfat` driver, which exposes a
+folder *as* a block device, does make a second source appear, but its FAT32 support is untested
+by its own admission and in practice the volume was corrupt within seconds of Engine writing
+its library to it (`fat_get_cluster: invalid start cluster`), and one file on the host came
+back modified. Do not use it in write mode.
+
 This is not faster. Measured at the device resolution it lands on 193 frames against the
 container's 191 to 209, so the Docker VM layer costs nothing worth measuring; what it removes is
 the encode, websocket and canvas redraw on every frame, which is the part that actually feels
