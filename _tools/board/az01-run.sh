@@ -18,11 +18,22 @@ R=/opt/az01
 S=/run/az01
 PRODUCT="${PRODUCT:-NH08}"
 
+# Only the daemons living in the chroot: Armbian runs a dbus-daemon and a
+# wpa_supplicant of its own, and killing those by name takes the host down
+# with them (its system bus, and everything that talks to it).
+kill_chroot_daemons() {
+    for p in $(pidof connmand wpa_supplicant dbus-daemon); do
+        [ "$(readlink /proc/$p/root 2>/dev/null)" = "$R" ] && kill $p 2>/dev/null
+    done
+    true
+}
+
 if [ "${1:-}" = "stop" ]; then
     # the main thread is renamed EMain, so pkill by name misses it: pidof goes by the binary
     kill $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
     sleep 2; kill -9 $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
     pkill -x uinput-touch 2>/dev/null || true
+    kill_chroot_daemons
     for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 1 > $v/bind 2>/dev/null;; esac; done
     echo "stopped"; exit 0
 fi
@@ -37,6 +48,10 @@ printf 'TINKER0000000001\0'    > "$S/dt/base/serial-number"
 # 2. the interrupt Engine pins to a CPU
 sed 's/ff690000.serial/ttyS0/' /proc/interrupts > $S/interrupts
 grep -q ttyS0 $S/interrupts || sed '0,/eth0/s/eth0/ttyS0/' /proc/interrupts > $S/interrupts
+# 2b. wlan0 belongs to the chroot's ConnMan, not to Armbian's supplicants
+systemctl stop wpa_supplicant 2>/dev/null || true
+pkill -f "wpa_supplicant -c /run/netplan" 2>/dev/null || true
+
 # 3. the display
 systemctl stop getty@tty1 2>/dev/null || true
 for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 0 > $v/bind 2>/dev/null;; esac; done
@@ -75,9 +90,33 @@ fi
 
 kill $(pidof Engine OfflineAnalyzer) 2>/dev/null || true; sleep 1
 kill -9 $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
+kill_chroot_daemons
 rm -f $R/tmp/engine_runguard.lock
 
-# 4. the chroot, in its own mount namespace so nothing leaks into Armbian.
+# 4. what runs inside the chroot, written where the chroot sees it
+cat > $R/root/az01-inner.sh <<'INNER'
+# the system bus, so edisksd (drives) and the rest are reachable and activatable
+mkdir -p /run/dbus
+[ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id
+dbus-daemon --system --fork
+# Wi-Fi: Engine asks ConnMan (net.connman), ConnMan drives wpa_supplicant,
+# both on this bus and both started by systemd on the real unit. Armbian has
+# let go of wlan0 already, and ConnMan is kept off the Ethernet cable this
+# whole session runs over.
+grep -q NetworkInterfaceBlacklist /etc/connman/main.conf \
+    || sed -i '/^\[General\]/a NetworkInterfaceBlacklist=end0,eth0,sit0,ip6tnl0,lo' /etc/connman/main.conf
+(setsid /usr/sbin/wpa_supplicant -u -s < /dev/null > /dev/null 2>&1 &)
+sleep 1
+(setsid /usr/sbin/connmand -n < /dev/null > /root/connman.log 2>&1 &)
+export LD_LIBRARY_PATH=/usr/qt/lib
+export QT_QPA_PLATFORM=eglfs
+[ -f /root/qtlog.ini ] && export QT_LOGGING_CONF=/root/qtlog.ini
+[ -f /usr/Engine/Scripts/setup-screenrotation.sh ] && . /usr/Engine/Scripts/setup-screenrotation.sh "$1"
+cd /usr/Engine
+exec ./Engine -d0 -loggerOptions "Type, Message, Thread, Category, SplitLongLines"
+INNER
+
+# 5. the chroot, in its own mount namespace so nothing leaks into Armbian.
 #    Armbian's kernel has RT_GROUP_SCHED, and with cgroup v2 a real-time policy
 #    is only granted in the root cgroup: an ssh session's scope gets EPERM on
 #    Engine's SCHED_FIFO audio thread, which it treats as fatal. So move there.
@@ -93,17 +132,6 @@ mount -t tmpfs tmpfs $R/run
 mkdir -p $R/run/udev; mount --bind /run/udev $R/run/udev
 mount --bind $S/dt/base $R/sys/firmware/devicetree/base
 mount --bind $S/interrupts $R/proc/interrupts
-exec chroot $R /bin/sh -c '
-  # the system bus, so edisksd (drives) and the rest are reachable and activatable
-  mkdir -p /run/dbus
-  [ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id
-  dbus-daemon --system --fork
-  export LD_LIBRARY_PATH=/usr/qt/lib
-  export QT_QPA_PLATFORM=eglfs
-  export QT_LOGGING_RULES=\"qt.qpa.*=true\"
-  [ -f /usr/Engine/Scripts/setup-screenrotation.sh ] && . /usr/Engine/Scripts/setup-screenrotation.sh $PRODUCT
-  cd /usr/Engine
-  exec ./Engine -d0 -loggerOptions \"Type, Message, Thread, Category, SplitLongLines\"
-'
+exec chroot $R /bin/sh /root/az01-inner.sh $PRODUCT
 " > $R/root/engine.log 2>&1 &
 echo "Engine started, log: $R/root/engine.log"
