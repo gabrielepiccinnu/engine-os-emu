@@ -321,7 +321,15 @@ bash _tools/surface.sh play 1
 ```
 
 `surface.sh` takes its note and channel numbers from the product's own assignment file in the
-rootfs, and `raw`, `note` and `cc` send anything else. There is still no audio: the card's PCM
+rootfs, and `raw`, `note` and `cc` send anything else.
+
+The whole surface is also a web page, `python3 _tools/surface-web.py`, which opens
+`http://127.0.0.1:8808/`: two decks with jog wheel, pitch slider, pads and transport, the mixer
+with EQ, faders, crossfader, FX and the browse encoder, every control sending what the real
+surface's microcontroller sends. The server keeps one ssh session open with `cat` writing to the
+inject device, and the bytes go down that pipe raw: no process per message on either side, which
+matters when a knob turn is a few hundred CCs a second under emulation. `HOST=0.0.0.0` makes it
+reachable from a phone or tablet on the LAN, which is the closest thing to the device itself. There is still no audio: the card's PCM
 carries no samples, so the deck plays into nothing, but everything Engine does around a playing
 track, analysis, waveform, beatgrid, key, time, is there to see.
 
@@ -361,6 +369,7 @@ Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
 | `_tools/snd-combined.c` | virtual ALSA card with playback, capture and MIDI, plus a `Control Surface` MIDI card Engine binds its assignment to |
 | `_tools/snd-combined-build.sh` | cross builds that module against the guest kernel |
 | `_tools/surface.sh` | presses the surface's buttons: load, play, cue, browse, or any note or CC |
+| `_tools/surface-web.py`, `_tools/surface.html` | the surface as a web page, every control sending the real MIDI |
 
 ## Credits
 
