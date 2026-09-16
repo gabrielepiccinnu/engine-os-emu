@@ -43,6 +43,22 @@ for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 0 > 
 echo performance > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/governor 2>/dev/null || true
 modprobe snd_seq_midi 2>/dev/null || true
 
+# 3a. the pointer. The RK3288 VOP in the mainline kernel has no cursor plane
+#     (every plane but the primary is an overlay), so the hardware cursor Qt
+#     defaults to has nowhere to go and the mouse is invisible. Engine copies
+#     this file verbatim into the QT_QPA_EGLFS_KMS_CONFIG it hands to Qt, and
+#     hwcursor=false makes Qt draw the arrow in OpenGL, inside the frame,
+#     where the mirror sees it too.
+SC=$R/usr/Engine/ScreenConfiguration/Default/ScreenConfiguration.json
+if [ -f "$SC" ] && ! grep -q '"hwcursor"' "$SC"; then
+    cp -n "$SC" "$SC.orig"
+    python3 - "$SC" <<'JSON'
+import json, sys
+f = sys.argv[1]; d = json.load(open(f)); d["hwcursor"] = False
+json.dump(d, open(f, "w"), indent=1)
+JSON
+fi
+
 # 3b. the touchscreen. Engine's interface answers touch, not mouse clicks,
 #     so the bridge from _tools/uinput-touch.c turns the USB mouse into one
 #     (relative movement integrated, left button = finger). It must exist
