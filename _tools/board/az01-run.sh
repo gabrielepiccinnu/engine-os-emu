@@ -22,6 +22,7 @@ if [ "${1:-}" = "stop" ]; then
     # the main thread is renamed EMain, so pkill by name misses it: pidof goes by the binary
     kill $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
     sleep 2; kill -9 $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
+    pkill -x uinput-touch 2>/dev/null || true
     for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 1 > $v/bind 2>/dev/null;; esac; done
     echo "stopped"; exit 0
 fi
@@ -41,6 +42,17 @@ systemctl stop getty@tty1 2>/dev/null || true
 for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 0 > $v/bind 2>/dev/null;; esac; done
 echo performance > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/governor 2>/dev/null || true
 modprobe snd_seq_midi 2>/dev/null || true
+
+# 3b. the touchscreen. Engine's interface answers touch, not mouse clicks,
+#     so the bridge from _tools/uinput-touch.c turns the USB mouse into one
+#     (relative movement integrated, left button = finger). It must exist
+#     before Engine starts and udev must have labelled it a touchscreen.
+if [ -x /root/uinput-touch ] && ! pidof uinput-touch > /dev/null; then
+    modprobe uinput 2>/dev/null || true
+    W=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d, -f1); H=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d, -f2)
+    setsid /root/uinput-touch -w "${W:-1920}" -h "${H:-1080}" < /dev/null > /dev/null 2>&1 &
+    sleep 2; udevadm settle --timeout=5 2>/dev/null || true
+fi
 
 kill $(pidof Engine OfflineAnalyzer) 2>/dev/null || true; sleep 1
 kill -9 $(pidof Engine OfflineAnalyzer) 2>/dev/null || true

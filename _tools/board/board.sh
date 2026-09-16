@@ -24,7 +24,11 @@ case "${1:-}" in
     cp)      exec scp -q $O "$2" "root@[$H]:$3" ;;
     get)     exec scp -q $O "root@[$H]:$2" "$3" ;;
     install) scp -q $O "$D/az01-run.sh" "$D/az01-mirror.sh" "root@[$H]:/root/"
-             ssh $O "root@$H" 'chmod +x /root/az01-run.sh /root/az01-mirror.sh'; echo installed ;;
+             # the touch bridge, built static in the container: docker exec engine-os-emu \
+             #   arm-linux-gnueabihf-gcc -O2 -w -static -o /work/_vm/uinput-touch-static /work/_tools/uinput-touch.c
+             # copied alongside and renamed: the running one is busy (ETXTBSY)
+             [ -f "$D/../../_vm/uinput-touch-static" ] && scp -q $O "$D/../../_vm/uinput-touch-static" "root@[$H]:/root/uinput-touch.new"
+             ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
     start)   ssh $O "root@$H" 'bash /root/az01-run.sh && bash /root/az01-mirror.sh' ;;
     stop)    ssh $O "root@$H" 'bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;
     shot)    ssh $O "root@$H" 'ffmpeg -loglevel error -y -f kmsgrab -device /dev/dri/card0 -format bgra -i - -frames:v 1 -update 1 -vf hwdownload,format=bgra -pix_fmt rgb24 /tmp/shot.png'

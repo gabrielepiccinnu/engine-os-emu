@@ -142,25 +142,42 @@ static int create_uinput(void)
     return fd;
 }
 
-/* Find the tablet by name, so the event number does not matter. */
+/* Find the tablet by name, so the event number does not matter. Failing
+ * that, a mouse: on real hardware there is no tablet, and a USB mouse is
+ * what gets plugged in. Its movements are relative and are integrated
+ * here, one pixel per count and clamped to the screen, which is exactly
+ * what Qt's own evdevmouse does with the same events, so the cursor Qt
+ * draws and the touch this bridge emits stay together; pushing the mouse
+ * into a corner brings them back together if they ever drift. */
+static int relative = 0;
+
 static int find_tablet(void)
 {
     char path[64], name[256];
-    int i, fd;
-    for (i = 0; i < 32; i++) {
-        snprintf(path, sizeof path, "/dev/input/event%d", i);
-        fd = open(path, O_RDONLY | O_NONBLOCK);
-        if (fd < 0) continue;
-        name[0] = 0;
-        ioctl(fd, EVIOCGNAME(sizeof name), name);
-        if (strstr(name, "Tablet") || strstr(name, "tablet")) {
-            logp("tablet: %s (%s)\n", path, name);
-            return fd;
+    int i, fd, pass;
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 0; i < 32; i++) {
+            snprintf(path, sizeof path, "/dev/input/event%d", i);
+            fd = open(path, O_RDONLY | O_NONBLOCK);
+            if (fd < 0) continue;
+            name[0] = 0;
+            ioctl(fd, EVIOCGNAME(sizeof name), name);
+            if (pass == 0 && (strstr(name, "Tablet") || strstr(name, "tablet"))) {
+                logp("tablet: %s (%s)\n", path, name);
+                return fd;
+            }
+            if (pass == 1 && (strstr(name, "Mouse") || strstr(name, "mouse"))) {
+                logp("mouse: %s (%s), relative\n", path, name);
+                relative = 1;
+                return fd;
+            }
+            close(fd);
         }
-        close(fd);
     }
     return -1;
 }
+
+static int clamp(int v, int max) { return v < 0 ? 0 : (v > max ? max : v); }
 
 int main(int argc, char **argv)
 {
@@ -184,7 +201,7 @@ int main(int argc, char **argv)
     logp("virtual touchscreen created: %dx%d\n", scr_w, scr_h);
 
     tfd = dev ? open(dev, O_RDONLY | O_NONBLOCK) : find_tablet();
-    if (tfd < 0) logp("WARNING: tablet not found, fifo taps only\n");
+    if (tfd < 0) logp("WARNING: no tablet and no mouse, fifo taps only\n");
     else if (grab && ioctl(tfd, EVIOCGRAB, 1) == 0) logp("tablet under EVIOCGRAB\n");
 
     unlink("/tmp/tapfifo");
@@ -211,6 +228,12 @@ int main(int argc, char **argv)
                 } else if (e.type == EV_ABS && e.code == ABS_Y) {
                     cur_y = (int)((long long)e.value * scr_h / TABLET_RANGE);
                     have_y = 1;
+                } else if (e.type == EV_REL && e.code == REL_X) {
+                    cur_x = clamp(cur_x + e.value, scr_w - 1);
+                    have_x = have_y = 1;
+                } else if (e.type == EV_REL && e.code == REL_Y) {
+                    cur_y = clamp(cur_y + e.value, scr_h - 1);
+                    have_x = have_y = 1;
                 } else if (e.type == EV_KEY && e.code == BTN_LEFT) {
                     if (e.value) touch_down(cur_x, cur_y);
                     else touch_up();
