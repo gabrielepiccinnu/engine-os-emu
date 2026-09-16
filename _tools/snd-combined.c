@@ -15,7 +15,33 @@
 // accepts the card. Real audio would come from a USB interface presenting the
 // same shape, which is the point of the exercise.
 //
-//     insmod snd-combined.ko id=NH08 name="NH08" channels=2 rate=48000
+// THE CONTROL SURFACE IS A SECOND CARD, AND A CROSSOVER
+// On the real unit the buttons, pads and encoders talk MIDI over a UART, and
+// that port is a separate ALSA card whose client and port are both called
+// "Control Surface" (the firmware updater names it as its flash target,
+// "Control Surface:Control Surface 16:0"). Engine binds the product's
+// assignment file to that name, so the card here carries it too. Its rawmidi
+// device 0 is the one Engine opens. Device 1 is the other end of the cable:
+// whatever is written to it arrives as input on device 0. That turns the
+// product's own assignment file into a way of pressing its buttons:
+//
+//     amidi -p hw:Surface,1 -S "9f 01 7f"    # Note On, channel 16, note 1: LOAD, deck 1
+//
+// Device 1 has no input side on purpose. Engine opens every port it can
+// read and pairs an output with whichever input answers its identity
+// request first; an input on the inject device would get the request echoed
+// into it and win that race, and the assignment would then listen to the
+// wrong port. What Engine writes to the surface (LED colours, SysEx) is
+// visible with debug=1 in the kernel log instead.
+//
+// Engine binds nothing to a port until it has answered a MIDI Identity
+// Request. Its KnownDevices.xml wants the reply of the real surface,
+//   7E ?? 06 02 00 01 3F 3F ?? ?? ?? ?? ?? ?? 00
+// inMusic's manufacturer id and family 3F, and it asks only three times in
+// the first half minute. So the surface card answers that request itself,
+// on the spot, and Engine loads "NH08 Controller" as if the buttons were there.
+//
+//     insmod snd-combined.ko id=NH08 name="NH08" channels=16 rate=48000
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -34,12 +60,26 @@ static char *id = "COMBINED";
 static char *name = "Combined";
 static int channels = 2;
 static int rate = 48000;
+static char *surface = "Control Surface";
+static bool debug;
+static char *identity = "00 01 01 00 00 31";
 module_param(id, charp, 0444);
 module_param(name, charp, 0444);
 module_param(channels, int, 0444);
 module_param(rate, int, 0444);
+module_param(surface, charp, 0444);
+MODULE_PARM_DESC(surface, "name of the control surface MIDI card, empty for none");
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "log every byte crossing between the two MIDI devices");
+module_param(identity, charp, 0444);
+MODULE_PARM_DESC(identity, "the six free bytes of the identity reply; the last four are the firmware version");
 
 static struct platform_device *combined_pdev;
+
+struct combined_cards {
+	struct snd_card *audio;
+	struct snd_card *surface;
+};
 
 struct combined_stream {
 	struct snd_pcm_substream *substream;
@@ -171,27 +211,190 @@ static const struct snd_pcm_ops combined_ops = {
 };
 
 /* The MIDI side exists so the card owns a sequencer client: that is what the
- * device manager follows back to a card number. It moves no bytes. */
-static int combined_midi_open(struct snd_rawmidi_substream *s) { return 0; }
-static int combined_midi_close(struct snd_rawmidi_substream *s) { return 0; }
-static void combined_midi_trigger(struct snd_rawmidi_substream *s, int up) { }
-
-static const struct snd_rawmidi_ops combined_midi_ops = {
-	.open = combined_midi_open,
-	.close = combined_midi_close,
-	.trigger = combined_midi_trigger,
+ * device manager follows back to a card number. On top of that the two
+ * rawmidi devices are wired to each other: the output of either is the
+ * input of the other, so device 1 can play the control surface. */
+struct combined_midi {
+	spinlock_t lock;
+	struct snd_rawmidi_substream *input[2];	/* input substream per device */
+	bool input_running[2];
+	bool answer_identity;			/* the surface card: reply to 7E xx 06 01 */
+	unsigned char sysex[16];		/* the SysEx being written to device 0 */
+	int sysex_len;				/* -1 outside a SysEx */
 };
 
-static int combined_probe(struct platform_device *pdev)
+/* Universal Identity Reply: inMusic (00 01 3F), family 3F, then six bytes
+ * Engine's pattern leaves free. It reads the last four as the surface's
+ * firmware version and wants it EQUAL to the one it ships in
+ * /usr/Engine/Firmware/<product> Controller/firmware.json, 1.0.0.49 for
+ * NH08: anything else, newer included, is "version mismatch; starting
+ * updater" and Engine quits into the firmware updater. Another firmware
+ * image needs the identity= parameter set to its version. */
+static unsigned char identity_reply[] = {
+	0xf0, 0x7e, 0x00, 0x06, 0x02, 0x00, 0x01, 0x3f, 0x3f,
+	0x00, 0x01, 0x01, 0x00, 0x00, 0x31, 0x00, 0xf7
+};
+
+static void combined_parse_identity(void)
 {
-	struct snd_card *card;
-	struct snd_pcm *pcm;
+	const char *p = identity;
+	int i, v;
+
+	for (i = 0; i < 6; i++) {
+		while (*p == ' ')
+			p++;
+		if (sscanf(p, "%2x", &v) != 1)
+			return;
+		identity_reply[9 + i] = v & 0x7f;
+		while (*p && *p != ' ')
+			p++;
+	}
+}
+
+/* Watches the bytes Engine writes to the surface for an Identity Request
+ * and, on its F7, feeds the reply back as surface input. Called with the
+ * crossover lock held. */
+static void combined_midi_identity(struct combined_midi *m, const unsigned char *buf, int n)
+{
+	int i;
+
+	for (i = 0; i < n; i++) {
+		unsigned char c = buf[i];
+
+		if (c == 0xf0) {
+			m->sysex_len = 0;
+			continue;
+		}
+		if (m->sysex_len < 0)
+			continue;
+		if (c != 0xf7) {
+			if (m->sysex_len < (int)sizeof(m->sysex))
+				m->sysex[m->sysex_len] = c;
+			m->sysex_len++;
+			continue;
+		}
+		if (m->sysex_len == 4 && m->sysex[0] == 0x7e &&
+		    m->sysex[2] == 0x06 && m->sysex[3] == 0x01 &&
+		    m->input_running[0] && m->input[0]) {
+			if (debug)
+				pr_info("midi surface> identity reply\n");
+			snd_rawmidi_receive(m->input[0], identity_reply, sizeof(identity_reply));
+		}
+		m->sysex_len = -1;
+	}
+}
+
+static int combined_midi_open(struct snd_rawmidi_substream *s) { return 0; }
+static int combined_midi_close(struct snd_rawmidi_substream *s) { return 0; }
+
+static int combined_midi_input_open(struct snd_rawmidi_substream *s)
+{
+	struct combined_midi *m = s->rmidi->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->lock, flags);
+	m->input[s->rmidi->device] = s;
+	spin_unlock_irqrestore(&m->lock, flags);
+	return 0;
+}
+
+static int combined_midi_input_close(struct snd_rawmidi_substream *s)
+{
+	struct combined_midi *m = s->rmidi->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->lock, flags);
+	m->input[s->rmidi->device] = NULL;
+	m->input_running[s->rmidi->device] = false;
+	spin_unlock_irqrestore(&m->lock, flags);
+	return 0;
+}
+
+static void combined_midi_input_trigger(struct snd_rawmidi_substream *s, int up)
+{
+	struct combined_midi *m = s->rmidi->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->lock, flags);
+	m->input_running[s->rmidi->device] = up;
+	spin_unlock_irqrestore(&m->lock, flags);
+}
+
+/* Output of one device is delivered straight into the input of the other.
+ * Bytes written while the far side is not reading are dropped, as they would
+ * be on a cable with nothing listening. */
+static void combined_midi_output_trigger(struct snd_rawmidi_substream *s, int up)
+{
+	struct combined_midi *m = s->rmidi->private_data;
+	int peer = 1 - s->rmidi->device;
+	unsigned char buf[64];
+	unsigned long flags;
+	int n;
+
+	if (!up)
+		return;
+	for (;;) {
+		n = snd_rawmidi_transmit(s, buf, sizeof(buf));
+		if (n <= 0)
+			break;
+		if (debug)
+			print_hex_dump(KERN_INFO, s->rmidi->device ? "midi inject> " : "midi engine> ",
+				       DUMP_PREFIX_NONE, 32, 1, buf, n, false);
+		spin_lock_irqsave(&m->lock, flags);
+		if (m->input_running[peer] && m->input[peer])
+			snd_rawmidi_receive(m->input[peer], buf, n);
+		if (m->answer_identity && s->rmidi->device == 0)
+			combined_midi_identity(m, buf, n);
+		spin_unlock_irqrestore(&m->lock, flags);
+	}
+}
+
+static const struct snd_rawmidi_ops combined_midi_output_ops = {
+	.open = combined_midi_open,
+	.close = combined_midi_close,
+	.trigger = combined_midi_output_trigger,
+};
+
+static const struct snd_rawmidi_ops combined_midi_input_ops = {
+	.open = combined_midi_input_open,
+	.close = combined_midi_input_close,
+	.trigger = combined_midi_input_trigger,
+};
+
+static int combined_midi_new(struct snd_card *card, struct combined_midi *m,
+			     int device, char *label, bool with_input)
+{
 	struct snd_rawmidi *rmidi;
 	int err;
 
-	err = snd_card_new(&pdev->dev, SNDRV_DEFAULT_IDX1, id, THIS_MODULE, 0, &card);
+	err = snd_rawmidi_new(card, label, device, 1, with_input ? 1 : 0, &rmidi);
 	if (err < 0)
 		return err;
+	strscpy(rmidi->name, label, sizeof(rmidi->name));
+	rmidi->info_flags = SNDRV_RAWMIDI_INFO_OUTPUT;
+	if (with_input)
+		rmidi->info_flags |= SNDRV_RAWMIDI_INFO_INPUT | SNDRV_RAWMIDI_INFO_DUPLEX;
+	rmidi->private_data = m;
+	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &combined_midi_output_ops);
+	if (with_input)
+		snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &combined_midi_input_ops);
+	return 0;
+}
+
+static int combined_audio_card(struct platform_device *pdev, struct snd_card **out)
+{
+	struct snd_card *card;
+	struct snd_pcm *pcm;
+	struct combined_midi *midi;
+	int err;
+
+	err = snd_card_new(&pdev->dev, SNDRV_DEFAULT_IDX1, id, THIS_MODULE,
+			   sizeof(*midi), &card);
+	if (err < 0)
+		return err;
+	midi = card->private_data;
+	spin_lock_init(&midi->lock);
+	midi->sysex_len = -1;
 
 	strscpy(card->driver, "Combined", sizeof(card->driver));
 	strscpy(card->shortname, name, sizeof(card->shortname));
@@ -208,20 +411,16 @@ static int combined_probe(struct platform_device *pdev)
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL,
 				       0, 4 * 1024 * 1024);
 
-	err = snd_rawmidi_new(card, name, 0, 1, 1, &rmidi);
+	/* the MIDI client the device manager follows back to this card; it
+	 * has no partner, so what is written to it goes nowhere */
+	err = combined_midi_new(card, midi, 0, name, true);
 	if (err < 0)
 		goto fail;
-	strscpy(rmidi->name, name, sizeof(rmidi->name));
-	rmidi->info_flags = SNDRV_RAWMIDI_INFO_OUTPUT | SNDRV_RAWMIDI_INFO_INPUT |
-			    SNDRV_RAWMIDI_INFO_DUPLEX;
-	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &combined_midi_ops);
-	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &combined_midi_ops);
 
 	err = snd_card_register(card);
 	if (err < 0)
 		goto fail;
-
-	platform_set_drvdata(pdev, card);
+	*out = card;
 	return 0;
 
 fail:
@@ -229,9 +428,77 @@ fail:
 	return err;
 }
 
+static int combined_surface_card(struct platform_device *pdev, struct snd_card **out)
+{
+	struct snd_card *card;
+	struct combined_midi *midi;
+	char label[64];
+	int err;
+
+	err = snd_card_new(&pdev->dev, SNDRV_DEFAULT_IDX1, "Surface", THIS_MODULE,
+			   sizeof(*midi), &card);
+	if (err < 0)
+		return err;
+	midi = card->private_data;
+	spin_lock_init(&midi->lock);
+	midi->answer_identity = true;
+	midi->sysex_len = -1;
+	combined_parse_identity();
+
+	strscpy(card->driver, "Combined", sizeof(card->driver));
+	strscpy(card->shortname, surface, sizeof(card->shortname));
+	strscpy(card->longname, surface, sizeof(card->longname));
+
+	/* device 0 carries the surface's own name: it is the one Engine binds */
+	err = combined_midi_new(card, midi, 0, surface, true);
+	if (err < 0)
+		goto fail;
+	snprintf(label, sizeof(label), "%s inject", surface);
+	err = combined_midi_new(card, midi, 1, label, false);
+	if (err < 0)
+		goto fail;
+
+	err = snd_card_register(card);
+	if (err < 0)
+		goto fail;
+	*out = card;
+	return 0;
+
+fail:
+	snd_card_free(card);
+	return err;
+}
+
+static int combined_probe(struct platform_device *pdev)
+{
+	struct combined_cards *cards;
+	int err;
+
+	cards = devm_kzalloc(&pdev->dev, sizeof(*cards), GFP_KERNEL);
+	if (!cards)
+		return -ENOMEM;
+
+	err = combined_audio_card(pdev, &cards->audio);
+	if (err < 0)
+		return err;
+	if (surface && *surface) {
+		err = combined_surface_card(pdev, &cards->surface);
+		if (err < 0) {
+			snd_card_free(cards->audio);
+			return err;
+		}
+	}
+	platform_set_drvdata(pdev, cards);
+	return 0;
+}
+
 static int combined_remove(struct platform_device *pdev)
 {
-	snd_card_free(platform_get_drvdata(pdev));
+	struct combined_cards *cards = platform_get_drvdata(pdev);
+
+	if (cards->surface)
+		snd_card_free(cards->surface);
+	snd_card_free(cards->audio);
 	return 0;
 }
 
