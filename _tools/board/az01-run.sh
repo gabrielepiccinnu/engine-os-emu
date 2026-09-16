@@ -81,15 +81,26 @@ modprobe snd_seq_midi 2>/dev/null || true
 #     this file verbatim into the QT_QPA_EGLFS_KMS_CONFIG it hands to Qt, and
 #     hwcursor=false makes Qt draw the arrow in OpenGL, inside the frame,
 #     where the mirror sees it too.
+#     The mode too: the display's preferred one is 1920x1080 on a TV, which
+#     is twice the pixels of the device's own 1280x800 panel for the GPU to
+#     fill and for the mirror to copy and encode, with the heat that goes with
+#     it. Engine lays its interface out to whatever the mode is. Qt matches
+#     the entry by connector name, HDMI1 here; MODE= picks another.
+MODE="${MODE:-1280x800}"
 SC=$R/usr/Engine/ScreenConfiguration/Default/ScreenConfiguration.json
-if [ -f "$SC" ] && ! grep -q '"hwcursor"' "$SC"; then
+if [ -f "$SC" ]; then
     cp -n "$SC" "$SC.orig"
-    python3 - "$SC" <<'JSON'
+    python3 - "$SC" "$MODE" <<'JSON'
 import json, sys
-f = sys.argv[1]; d = json.load(open(f)); d["hwcursor"] = False
+f, mode = sys.argv[1], sys.argv[2]
+d = json.load(open(f)); d["hwcursor"] = False
+outs = [o for o in d.get("outputs", []) if o.get("name") != "HDMI1"]
+outs.append({"name": "HDMI1", "mode": mode})
+d["outputs"] = outs
 json.dump(d, open(f, "w"), indent=1)
 JSON
 fi
+echo "$MODE" > $S/mode
 
 # 3c. the sound card and the control surface, the same module as under QEMU
 #     built against Armbian's kernel (_vm/snd-combined-board.ko, copied here
@@ -110,7 +121,6 @@ if [ -x /root/uinput-touch ] && ! pidof uinput-touch > /dev/null; then
     modprobe uinput 2>/dev/null || true
     # the size is the connected output's preferred mode, which is what Engine
     # sets; fb0 keeps reporting the console's mode after fbcon is unbound
-    MODE=$(for c in /sys/class/drm/card0-*; do [ "$(cat $c/status)" = connected ] && head -n1 $c/modes && break; done)
     W=${MODE%x*}; H=${MODE#*x}
     setsid /root/uinput-touch -w "${W:-1920}" -h "${H:-1080}" < /dev/null > /dev/null 2>&1 &
     sleep 2; udevadm settle --timeout=5 2>/dev/null || true

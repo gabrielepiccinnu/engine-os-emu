@@ -88,7 +88,9 @@ class Frames(threading.Thread):
                     self.error = ""
                     buf = b""
                     while True:
-                        chunk = r.read(65536)
+                        # read1: whatever has arrived, not a full 64 KB, or a
+                        # frame would wait for the next three to fill the buffer
+                        chunk = r.read1(65536)
                         if not chunk:
                             break
                         buf += chunk
@@ -119,10 +121,11 @@ frames = Frames()
 
 
 def screen_size():
-    """The mode Engine set: the connector's preferred one. fb0 still reports
-    the console's mode, which is not what is on the screen any more."""
+    """The mode Engine set: what the launcher wrote to /run/az01/mode, or
+    failing that the connector's preferred one. fb0 still reports the
+    console's mode, which is not what is on the screen any more."""
     try:
-        out = subprocess.run(SSH + ["for c in /sys/class/drm/card0-*; do [ \"$(cat $c/status)\" = connected ] && head -n1 $c/modes && break; done"],
+        out = subprocess.run(SSH + ["cat /run/az01/mode 2>/dev/null || for c in /sys/class/drm/card0-*; do [ \"$(cat $c/status)\" = connected ] && head -n1 $c/modes && break; done"],
                              capture_output=True, text=True, timeout=10).stdout.strip()
         w, h = out.split("x")
         return int(w), int(h)
