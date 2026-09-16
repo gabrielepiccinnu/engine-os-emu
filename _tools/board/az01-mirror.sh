@@ -10,8 +10,11 @@
 # the JPEG encoder is what limits the rate on the RK3288: 1920x1080 at ~6-8
 # fps, half that size at more. It is a mirror, not a remote desktop: input
 # comes from the mouse on the board or from the web surface.
-FPS="${FPS:-8}"
-SCALE="${SCALE:-960:-1}"
+# 5 fps at 800 px: the JPEG encoding runs on the CPU, and together with
+# Engine it is enough heat to take an uncooled board to thermal shutdown at
+# 8 fps and 960 px. Raise both on a board with a heatsink.
+FPS="${FPS:-5}"
+SCALE="${SCALE:-800:-1}"
 PORT="${PORT:-8090}"
 ADDR="${ADDR:-169.254.41.200}"
 

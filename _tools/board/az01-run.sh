@@ -55,7 +55,11 @@ pkill -f "wpa_supplicant -c /run/netplan" 2>/dev/null || true
 # 3. the display
 systemctl stop getty@tty1 2>/dev/null || true
 for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 0 > $v/bind 2>/dev/null;; esac; done
-echo performance > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/governor 2>/dev/null || true
+# The real unit pins the GPU to "performance"; a bare Tinker Board with no
+# heatsink then reaches the critical temperature within the hour and the
+# kernel powers it off (HARDWARE PROTECTION shutdown). The default governor
+# stays, and GPU_PERFORMANCE=1 is there for a board that is cooled.
+[ -n "${GPU_PERFORMANCE:-}" ] && echo performance > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/governor 2>/dev/null
 modprobe snd_seq_midi 2>/dev/null || true
 
 # 3a. the pointer. The RK3288 VOP in the mainline kernel has no cursor plane

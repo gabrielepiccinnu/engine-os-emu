@@ -12,6 +12,7 @@
 #     bash board.sh start           Engine on the HDMI, and the mirror
 #     bash board.sh stop
 #     bash board.sh shot FILE.png   grab the HDMI output
+#     bash board.sh temp            CPU and GPU temperature, and the GPU clock
 #
 # BOARD_HOST overrides the address; BOARD_IF the Mac's interface (en0).
 set -e
@@ -31,6 +32,7 @@ case "${1:-}" in
              ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
     start)   ssh $O "root@$H" 'bash /root/az01-run.sh && bash /root/az01-mirror.sh' ;;
     stop)    ssh $O "root@$H" 'bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;
+    temp)    ssh $O "root@$H" 'for z in /sys/class/thermal/thermal_zone*; do printf "%s: %s C\n" "$(cat $z/type)" "$(( $(cat $z/temp) / 1000 ))"; done; cat /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/cur_freq 2>/dev/null | sed "s/^/gpu Hz: /"; uptime' ;;
     shot)    ssh $O "root@$H" 'ffmpeg -loglevel error -y -f kmsgrab -device /dev/dri/card0 -format bgra -i - -frames:v 1 -update 1 -vf hwdownload,format=bgra -pix_fmt rgb24 /tmp/shot.png'
              scp -q $O "root@[$H]:/tmp/shot.png" "${2:-board-shot.png}"; echo "saved: ${2:-board-shot.png}" ;;
     *)       exec ssh $O "root@$H" "$@" ;;
