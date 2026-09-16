@@ -31,8 +31,13 @@
 // read and pairs an output with whichever input answers its identity
 // request first; an input on the inject device would get the request echoed
 // into it and win that race, and the assignment would then listen to the
-// wrong port. What Engine writes to the surface (LED colours, SysEx) is
-// visible with debug=1 in the kernel log instead.
+// wrong port. What Engine writes to the surface (LED colours, VU meters,
+// SysEx) is readable instead from
+//
+//     /proc/asound/Surface/monitor
+//
+// a blocking byte stream that is not a MIDI port, so Engine cannot see it.
+// debug=1 also prints every byte to the kernel log.
 //
 // Engine binds nothing to a port until it has answered a MIDI Identity
 // Request. Its KnownDevices.xml wants the reply of the real surface,
@@ -48,7 +53,11 @@
 #include <linux/platform_device.h>
 #include <linux/math64.h>
 #include <linux/timer.h>
+#include <linux/kfifo.h>
+#include <linux/poll.h>
+#include <linux/wait.h>
 #include <sound/core.h>
+#include <sound/info.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
 #include <sound/rawmidi.h>
@@ -221,6 +230,10 @@ struct combined_midi {
 	bool answer_identity;			/* the surface card: reply to 7E xx 06 01 */
 	unsigned char sysex[16];		/* the SysEx being written to device 0 */
 	int sysex_len;				/* -1 outside a SysEx */
+	/* everything Engine writes to device 0, for /proc/asound/<card>/monitor */
+	DECLARE_KFIFO(monitor, unsigned char, 4096);
+	wait_queue_head_t monitor_wait;
+	bool monitor_open;
 };
 
 /* Universal Identity Reply: inMusic (00 01 3F), family 3F, then six bytes
@@ -345,8 +358,99 @@ static void combined_midi_output_trigger(struct snd_rawmidi_substream *s, int up
 			snd_rawmidi_receive(m->input[peer], buf, n);
 		if (m->answer_identity && s->rmidi->device == 0)
 			combined_midi_identity(m, buf, n);
+		if (m->monitor_open && s->rmidi->device == 0) {
+			/* a reader that fell behind loses the oldest bytes, not the newest */
+			while (kfifo_avail(&m->monitor) < n)
+				kfifo_skip(&m->monitor);
+			kfifo_in(&m->monitor, buf, n);
+		}
 		spin_unlock_irqrestore(&m->lock, flags);
+		if (m->monitor_open && s->rmidi->device == 0)
+			wake_up_interruptible(&m->monitor_wait);
 	}
+}
+
+/* The monitor: what Engine sends to the surface, as a stream. One reader at a
+ * time, blocking, so `cat` on it behaves like a serial port. */
+static int combined_monitor_open(struct snd_info_entry *entry, unsigned short mode, void **file_private_data)
+{
+	struct combined_midi *m = entry->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->lock, flags);
+	if (m->monitor_open) {
+		spin_unlock_irqrestore(&m->lock, flags);
+		return -EBUSY;
+	}
+	kfifo_reset(&m->monitor);
+	m->monitor_open = true;
+	spin_unlock_irqrestore(&m->lock, flags);
+	return 0;
+}
+
+static int combined_monitor_release(struct snd_info_entry *entry, unsigned short mode, void *file_private_data)
+{
+	struct combined_midi *m = entry->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->lock, flags);
+	m->monitor_open = false;
+	spin_unlock_irqrestore(&m->lock, flags);
+	return 0;
+}
+
+static ssize_t combined_monitor_read(struct snd_info_entry *entry, void *file_private_data,
+				     struct file *file, char __user *buf, size_t count, loff_t pos)
+{
+	struct combined_midi *m = entry->private_data;
+	unsigned int copied;
+	int err;
+
+	if (kfifo_is_empty(&m->monitor)) {
+		if (file->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		err = wait_event_interruptible(m->monitor_wait, !kfifo_is_empty(&m->monitor));
+		if (err)
+			return err;
+	}
+	err = kfifo_to_user(&m->monitor, buf, count, &copied);
+	return err ? err : copied;
+}
+
+static __poll_t combined_monitor_poll(struct snd_info_entry *entry, void *file_private_data,
+				      struct file *file, poll_table *wait)
+{
+	struct combined_midi *m = entry->private_data;
+
+	poll_wait(file, &m->monitor_wait, wait);
+	return kfifo_is_empty(&m->monitor) ? 0 : (EPOLLIN | EPOLLRDNORM);
+}
+
+static const struct snd_info_entry_ops combined_monitor_ops = {
+	.open = combined_monitor_open,
+	.release = combined_monitor_release,
+	.read = combined_monitor_read,
+	.poll = combined_monitor_poll,
+};
+
+static int combined_monitor_new(struct snd_card *card, struct combined_midi *m)
+{
+	struct snd_info_entry *entry;
+
+	INIT_KFIFO(m->monitor);
+	init_waitqueue_head(&m->monitor_wait);
+	entry = snd_info_create_card_entry(card, "monitor", card->proc_root);
+	if (!entry)
+		return -ENOMEM;
+	entry->content = SNDRV_INFO_CONTENT_DATA;
+	entry->private_data = m;
+	entry->c.ops = &combined_monitor_ops;
+	entry->mode = S_IFREG | 0444;
+	/* snd_info clips every read to entry->size before calling ops->read,
+	 * and a stream has no size: make it one no reader will reach */
+	entry->size = 1UL << 30;
+	/* card registration takes care of snd_info_register for its entries */
+	return 0;
 }
 
 static const struct snd_rawmidi_ops combined_midi_output_ops = {
@@ -455,6 +559,9 @@ static int combined_surface_card(struct platform_device *pdev, struct snd_card *
 		goto fail;
 	snprintf(label, sizeof(label), "%s inject", surface);
 	err = combined_midi_new(card, midi, 1, label, false);
+	if (err < 0)
+		goto fail;
+	err = combined_monitor_new(card, midi);
 	if (err < 0)
 		goto fail;
 
