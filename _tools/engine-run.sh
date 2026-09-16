@@ -95,9 +95,15 @@ if [ -n "${MESA24:-}" ]; then
     echo "== graphics drivers: /opt/mesa24 =="
 fi
 
+# SHARE_NAME=Music bash engine-run.sh -> the folder name under which a host
+# folder shared by vm-run-macos.sh (SHARE=/path) shows up inside the ENGINEOS
+# drive. Only used when the VM actually carries the share: the guest checks
+# for the virtio-9p tag and does nothing otherwise.
+SHARE_NAME="${SHARE_NAME:-Mac}"
+
 echo "== preparing the guest and starting Engine =="
 ssh $SSHOPT root@127.0.0.1 QTRULES="$QTRULES" QTLIB="$QTLIB" MESAENV="$MESAENV" \
-    EXTRA_ENV="$EXTRA_ENV" 'sh -s' <<'GUEST'
+    EXTRA_ENV="$EXTRA_ENV" SHARE_NAME="$SHARE_NAME" 'sh -s' <<'GUEST'
 killall Engine 2>/dev/null
 sleep 2
 
@@ -171,6 +177,32 @@ setsid sh -c "LD_PRELOAD=/tmp/drmspy.so LD_LIBRARY_PATH=$QTLIB \
     QT_LOGGING_RULES='$QTRULES' $MESAENV $EXTRA_ENV \
     QT_QPA_PLATFORM=eglfs /usr/Engine/Engine -d0 > /tmp/engine.log 2>&1" < /dev/null &
 echo "Engine started"
+
+# 6. the host folder, if the VM was started with one
+# Engine does not look at the filesystem for its sources: it asks edisksd over
+# D-Bus, and edisksd only knows block devices that udev has labelled. A 9p
+# mount is neither, so on its own it would never appear. Instead it is bound
+# into the ENGINEOS drive, which Engine already treats as a source, where it
+# shows up as a folder in the Folder view. edisksd mounts ENGINEOS under
+# /media only once Engine is up, hence the wait, in the background so the
+# first frame is not delayed.
+if grep -qs '^share$' /sys/bus/virtio/devices/*/mount_tag; then
+    setsid sh -c '
+        modprobe 9pnet_virtio 2>/dev/null; modprobe 9p 2>/dev/null
+        mkdir -p /mnt/share
+        mountpoint -q /mnt/share \
+            || mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 share /mnt/share \
+            || { echo "9p mount failed" > /tmp/share.log; exit 1; }
+        i=0
+        while [ $i -lt 90 ] && ! mountpoint -q /media/ENGINEOS; do sleep 2; i=$((i+1)); done
+        mountpoint -q /media/ENGINEOS || { echo "ENGINEOS never mounted" > /tmp/share.log; exit 1; }
+        mkdir -p "/media/ENGINEOS/$SHARE_NAME"
+        mountpoint -q "/media/ENGINEOS/$SHARE_NAME" \
+            || mount --bind /mnt/share "/media/ENGINEOS/$SHARE_NAME"
+        echo "host folder bound at /media/ENGINEOS/$SHARE_NAME" > /tmp/share.log
+    ' < /dev/null > /dev/null 2>&1 &
+    echo "host folder: will appear as ENGINEOS/$SHARE_NAME once Engine is up"
+fi
 GUEST
 
 cat <<'MSG'

@@ -68,6 +68,18 @@ GPUOPT=",xres=${XRES:-1280},yres=${YRES:-800},edid=off"
 
 DTB="$VM/virt-inmusic.dtb"
 [ -f "$VM/virt-inmusic$SMP.dtb" ] && DTB="$VM/virt-inmusic$SMP.dtb"
+
+# SHARE=/some/folder hands a host folder to the guest over virtio-9p, under
+# the mount tag "share". engine-run.sh mounts it inside the ENGINEOS drive so
+# Engine finds the files where it expects a drive to be. security_model=none:
+# the guest is root, the files stay owned by whoever runs QEMU, and the
+# ownership calls the guest makes are ignored rather than mapped into xattrs.
+SHAREOPT=()
+if [ -n "${SHARE:-}" ]; then
+    [ -d "$SHARE" ] || { echo "SHARE is not a directory: $SHARE"; exit 1; }
+    SHAREOPT=(-fsdev "local,id=share,path=$SHARE,security_model=none"
+              -device virtio-9p-device,fsdev=share,mount_tag=share)
+fi
 # DTB=... to boot a different device tree. Engine takes its whole product
 # identity from inmusic,product-code in there, so this is what selects which
 # product it believes it is running on.
@@ -129,6 +141,7 @@ QEMU=(qemu-system-arm
   -device "virtio-gpu-device$GPUOPT"
   -device virtio-keyboard-device -device virtio-tablet-device
   -device virtio-rng-device
+  "${SHAREOPT[@]}"
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22
   -device virtio-net-device,netdev=n0
   "${DISPLAY_OPT[@]}"
