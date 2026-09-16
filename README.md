@@ -340,6 +340,35 @@ take the colours Engine gives them, and the two VU meters bounce with the track.
 carries no samples, so the deck plays into nothing, but everything Engine does around a playing
 track, analysis, waveform, beatgrid, key, time, is there to see.
 
+## On real hardware: an ASUS Tinker Board
+
+The Mixstream Pro is an RK3288, and so is the Tinker Board. With the rootfs unpacked into
+`/opt/az01` on an Armbian SD card, Engine runs there **natively**, on Armbian's kernel, with the
+Mali T760 driven by mainline panfrost, which is the driver the rootfs's own Mesa carries
+(`panfrost_dri.so` sits in `/usr/lib/dri`, virtio-gpu never did). No drmspy, no llvmpipe: the GPU
+draws, and at whatever the HDMI display offers, 1920x1080 included.
+
+```bash
+bash _tools/board/board.sh install    # az01-run.sh and az01-mirror.sh to /root on the board
+bash _tools/board/board.sh start      # Engine on the HDMI, mirror at http://169.254.41.200:8090/
+bash _tools/board/board.sh shot x.png # the HDMI output, from the DRM scanout buffer
+```
+
+`az01-run.sh` is `runengine` from the rootfs, done from a chroot in its own mount namespace,
+with what the board lacks stood in for: the product identity is a copy of the live device tree
+with `inmusic,product-code` and its neighbours added, bind-mounted over the real one; the control
+surface UART that Engine pins to a CPU is the console UART renamed in a copy of
+`/proc/interrupts`; the framebuffer console is unbound so Engine can become DRM master; a system
+D-Bus runs inside the chroot so `edisksd` and the rest are reachable. One thing was not
+obvious: Armbian's kernel has `RT_GROUP_SCHED`, and under cgroup v2 an ssh session's scope is
+refused `SCHED_FIFO`, which Engine treats as fatal for its audio thread. The launcher moves
+itself into the root cgroup first.
+
+`az01-mirror.sh` is the remote view: ffmpeg's `kmsgrab` reads the buffer the display is
+scanning out and serves it as MJPEG over HTTP, 8 fps at 960 px wide on this CPU, to any browser
+on the cable. The board has no DHCP on that link, so the Mac reaches it by IPv6 link-local for
+ssh and the script gives it an IPv4 link-local address for the browser.
+
 ## What will never work under emulation
 
 Audio (a custom I2S codec plus a separate XMOS DSP), jog wheels, motors, pads, and the ilitek
@@ -376,6 +405,7 @@ Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
 | `_tools/snd-combined.c` | virtual ALSA card with playback, capture and MIDI, plus a `Control Surface` MIDI card Engine binds its assignment to |
 | `_tools/snd-combined-build.sh` | cross builds that module against the guest kernel |
 | `_tools/surface.sh` | presses the surface's buttons: load, play, cue, browse, or any note or CC |
+| `_tools/board/` | Engine natively on an ASUS Tinker Board: launcher, HDMI mirror, and the Mac-side helper |
 | `_tools/surface-web.py`, `_tools/surface.html` | the surface as a web page, every control sending the real MIDI, LEDs and VU driven back by Engine |
 
 ## Credits
