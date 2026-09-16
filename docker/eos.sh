@@ -157,10 +157,13 @@ cmd_export() {
     say "copying the artifacts into $REPO/_vm"
     dex pgrep -x qemu-system-arm > /dev/null 2>&1 && \
         die "stop the VM first, or the disk images are copied mid-write: bash docker/eos.sh stop"
-    # tar -S keeps the holes: the three images are 5 GiB apparent, about 1 GiB real
+    # tar -S keeps the holes: the three images are 5 GiB apparent, about 1 GiB real.
+    # The sound card module only exists after snd-combined-build.sh has run.
     dex tar -cS -C /work/_vm -f - \
         rootfs-vm.img data.img media.img initrd.img virt-inmusic.dtb \
-        id_vm id_vm.pub drmspy.so uinput-touch | tar -x -C "$REPO/_vm"
+        id_vm id_vm.pub drmspy.so uinput-touch \
+        $(dex test -f /work/_vm/snd-combined.ko && echo snd-combined.ko) \
+        | tar -x -C "$REPO/_vm"
     docker cp "$NAME:/work/_vm/kdeb/boot/vmlinuz-6.1.0-50-armmp" "$REPO/_vm/"
     du -sh "$REPO/_vm" | sed 's/^/  /'
     echo "now: bash _tools/vm-run-macos.sh"

@@ -73,6 +73,13 @@ scp -P 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev
 # alongside and rename, which on Linux is always allowed.
 scp -P 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR /tmp/uinput-touch root@127.0.0.1:/tmp/uinput-touch.new > /dev/null
+# The virtual sound card and control surface, when snd-combined-build.sh has
+# produced it. Without it Engine has no audio device and no way to load a
+# track: loading is a button on the surface, not a touch gesture.
+if [ -f "$VM/snd-combined.ko" ]; then
+    scp -P 2222 -i /tmp/id_vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR "$VM/snd-combined.ko" root@127.0.0.1:/tmp/snd-combined.ko > /dev/null
+fi
 
 # EXTRA_ENV="LP_NUM_THREADS=2" bash engine-run.sh -> extra environment for the
 # Engine process. Rasterisation is ~95% of the guest's CPU time, so this is
@@ -165,6 +172,18 @@ if ! pidof uinput-touch > /dev/null 2>&1; then
         echo "virtual touchscreen: ${TS:-NONE}"
     else
         echo "WARNING: /dev/uinput missing, no touch"
+    fi
+fi
+
+# 4b. the sound card and the control surface, before Engine: it enumerates
+#     both at startup and identifies the surface within its first half minute.
+#     16 channels because the NH08 profile refuses anything under nine.
+if [ -f /tmp/snd-combined.ko ] && ! grep -q Surface /proc/asound/cards 2>/dev/null; then
+    for m in snd-pcm snd-rawmidi snd-seq snd-seq-midi; do modprobe $m 2>/dev/null; done
+    if insmod /tmp/snd-combined.ko id=NH08 name=NH08 channels=16 rate=48000 2>/dev/null; then
+        echo "virtual sound card and control surface: $(amidi -l 2>/dev/null | grep -c Surface) MIDI ports"
+    else
+        echo "WARNING: snd-combined.ko did not load"
     fi
 fi
 
