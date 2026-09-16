@@ -329,7 +329,14 @@ with EQ, faders, crossfader, FX and the browse encoder, every control sending wh
 surface's microcontroller sends. The server keeps one ssh session open with `cat` writing to the
 inject device, and the bytes go down that pipe raw: no process per message on either side, which
 matters when a knob turn is a few hundred CCs a second under emulation. `HOST=0.0.0.0` makes it
-reachable from a phone or tablet on the LAN, which is the closest thing to the device itself. There is still no audio: the card's PCM
+reachable from a phone or tablet on the LAN, which is the closest thing to the device itself.
+
+It lights up too. Everything Engine writes to the surface, the LED notes and the VU meter CCs,
+can be read from `/proc/asound/Surface/monitor`, a blocking stream the module keeps for exactly
+this: a MIDI port would be one more thing for Engine to open and pair, a proc file is invisible to
+it. The server reads it over a second ssh session and pushes each change to the page as a
+server-sent event, so PLAY glows while the deck runs, CUE blinks in time, the pads and pad modes
+take the colours Engine gives them, and the two VU meters bounce with the track. There is still no audio: the card's PCM
 carries no samples, so the deck plays into nothing, but everything Engine does around a playing
 track, analysis, waveform, beatgrid, key, time, is there to see.
 
@@ -369,7 +376,7 @@ Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
 | `_tools/snd-combined.c` | virtual ALSA card with playback, capture and MIDI, plus a `Control Surface` MIDI card Engine binds its assignment to |
 | `_tools/snd-combined-build.sh` | cross builds that module against the guest kernel |
 | `_tools/surface.sh` | presses the surface's buttons: load, play, cue, browse, or any note or CC |
-| `_tools/surface-web.py`, `_tools/surface.html` | the surface as a web page, every control sending the real MIDI |
+| `_tools/surface-web.py`, `_tools/surface.html` | the surface as a web page, every control sending the real MIDI, LEDs and VU driven back by Engine |
 
 ## Credits
 

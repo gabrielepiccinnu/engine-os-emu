@@ -11,9 +11,17 @@ device of the Control Surface card, and every message goes down that pipe as
 raw bytes. No process is spawned per message, on either side: a knob turn is a
 few hundred CCs a second and each `amidi` would cost tens of milliseconds
 under emulation. The ssh key and port are the ones every other tool here uses.
+
+The other direction is /events: a second ssh session reads what Engine writes
+to the surface from /proc/asound/Surface/monitor, the bytes are parsed into
+notes and CCs, and every change is pushed to the page as a server-sent event.
+That is how the LEDs and the VU meters light up: Engine drives them exactly as
+it would the real buttons.
 """
 import http.server
+import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -83,6 +91,84 @@ class Pipe:
 pipe = Pipe()
 
 
+class Monitor(threading.Thread):
+    """Reads Engine's output to the surface and keeps the LED and CC state."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.state = {}           # "n:ch:note" -> velocity, "c:ch:cc" -> value
+        self.lock = threading.Lock()
+        self.listeners = []       # queues of connected /events clients
+        self.proc = None
+
+    def run(self):
+        while True:
+            try:
+                self.proc = subprocess.Popen(SSH + ["cat /proc/asound/Surface/monitor"],
+                                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.parse(self.proc.stdout)
+            except OSError:
+                pass
+            time.sleep(2)         # the guest is down, or Engine restarted: try again
+
+    def parse(self, stream):
+        status, data, need = 0, [], 0
+        while True:
+            chunk = stream.read1(256) if hasattr(stream, "read1") else stream.read(1)
+            if not chunk:
+                return
+            for b in chunk:
+                if b == 0xF0:                     # SysEx: skip to F7
+                    status = 0xF0; continue
+                if status == 0xF0:
+                    if b == 0xF7: status = 0
+                    continue
+                if b >= 0xF8:                     # realtime, ignore
+                    continue
+                if b & 0x80:
+                    status, data = b, []
+                    need = 1 if (b & 0xF0) in (0xC0, 0xD0) else 2
+                    continue
+                if not status:
+                    continue
+                data.append(b)
+                if len(data) == need:
+                    self.message(status, data)
+                    data = []                     # running status keeps `status`
+
+    def message(self, status, data):
+        kind, ch = status & 0xF0, status & 0x0F
+        if kind in (0x90, 0x80):
+            key, val = "n:%d:%d" % (ch, data[0]), (data[1] if kind == 0x90 else 0)
+        elif kind == 0xB0:
+            key, val = "c:%d:%d" % (ch, data[0]), data[1]
+        else:
+            return
+        with self.lock:
+            if self.state.get(key) == val:
+                return
+            self.state[key] = val
+            ev = json.dumps({"k": key, "v": val})
+            for q in self.listeners:
+                try: q.put_nowait(ev)
+                except queue.Full: pass
+
+    def subscribe(self):
+        q = queue.Queue(maxsize=2000)
+        with self.lock:
+            snapshot = json.dumps(self.state)
+            self.listeners.append(q)
+        return q, snapshot
+
+    def unsubscribe(self, q):
+        with self.lock:
+            if q in self.listeners:
+                self.listeners.remove(q)
+
+
+monitor = Monitor()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -102,6 +188,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             with open(os.path.join(BASE, "_tools", "surface.html"), "rb") as f:
                 self._reply(200, f.read(), "text/html; charset=utf-8")
+        elif self.path == "/events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            q, snapshot = monitor.subscribe()
+            try:
+                self.wfile.write(("event: state\ndata: %s\n\n" % snapshot).encode()); self.wfile.flush()
+                while True:
+                    try:
+                        ev = q.get(timeout=15)
+                        self.wfile.write(("data: %s\n\n" % ev).encode())
+                    except queue.Empty:
+                        self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                monitor.unsubscribe(q)
         elif self.path == "/status":
             ok = pipe.alive() or pipe.open()
             self._reply(200, '{"connected": %s, "sent": %d, "error": %s}'
@@ -140,6 +246,7 @@ def main():
         print("guest: connected to the Control Surface inject port")
     else:
         print("guest: not reachable yet (%s), will retry on the first message" % pipe.error)
+    monitor.start()
 
     server = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
     url = "http://%s:%d/" % ("127.0.0.1" if HOST == "0.0.0.0" else HOST, PORT)
@@ -151,8 +258,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if pipe.proc:
-            pipe.proc.terminate()
+        for p in (pipe.proc, monitor.proc):
+            if p:
+                p.terminate()
 
 
 if __name__ == "__main__":

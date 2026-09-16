@@ -13,7 +13,7 @@
   Channels are zero based, as that file writes them:
     15      global: LOAD 1/2 = notes 1/2, BACK 3, browse CC 5 / push 6, MENU 7,
             VIEW 16, SoundSwitch 34; crossfader CC 14, master 15, cue mix 9,
-            cue gain 10, speaker 17
+            cue gain 10, speaker 17; VU meters back from Engine on CC 32/33
     2 / 3   deck left / right: SYNC 8, CUE 9, PLAY 10, pad modes 11 12 14 13,
             pads 15..18, SHIFT 28, pitch bend 29/30, jog touch 33, jog 14-bit
             CC 0x37/0x4D, VINYL 35, speed slider 14-bit CC 0x1F/0x4B
@@ -22,116 +22,130 @@
     4       FX: select Echo/Flanger/Delay/Phaser = notes 0..3, paddle note 4
             (channel 5 for the right paddle)
 
-  Bytes go to surface-web.py as hex over POST /midi, and from there down one
-  ssh pipe into the guest's inject device.
+  Bytes go to surface-web.py as hex over POST /midi and from there down one ssh
+  pipe into the guest's inject device. What Engine sends back to the surface,
+  LED notes and VU meter CCs, arrives on /events and lights the same controls.
 -->
 <style>
   :root {
-    --bg: #0b0b0c; --panel: #161618; --panel2: #1e1e21; --line: #2a2a2e;
-    --text: #e6e6e6; --dim: #8a8a90; --red: #ea2828; --red2: #ff5a5a;
-    --green: #3ddc84; --blue: #4a6cf7; --amber: #ffb340;
+    --bg: #0b0b0c; --panel: #151517; --panel2: #1e1e21; --line: #2a2a2e;
+    --text: #e6e6e6; --dim: #85858c; --red: #ea2828; --red2: #ff5a5a;
+    --green: #3ddc84; --blue: #4a8cf7; --amber: #ffb340; --cyan: #2fb0ff;
   }
   * { box-sizing: border-box; user-select: none; -webkit-user-select: none; touch-action: none; }
   html, body { margin: 0; background: var(--bg); color: var(--text);
     font: 12px/1.3 -apple-system, "Helvetica Neue", Roboto, sans-serif; }
-  body { padding: 12px 16px 60px; min-width: 320px; }
-  header { display: flex; align-items: baseline; gap: 14px; margin: 0 0 10px 4px; }
+  body { padding: 10px 14px 52px; }
+  header { display: flex; align-items: baseline; gap: 14px; margin: 0 0 10px 4px; flex-wrap: wrap; }
   header h1 { font-size: 15px; font-weight: 600; letter-spacing: .12em; margin: 0; }
   header h1 span { color: var(--red); }
   header .st { color: var(--dim); }
   header .st b { color: var(--green); font-weight: 600; }
   header .st b.off { color: var(--red2); }
 
-  .surface { display: grid; grid-template-columns: 1fr 340px 1fr; gap: 14px; }
-  @media (max-width: 1100px) { .surface { grid-template-columns: 1fr; } }
+  .surface { display: grid; grid-template-columns: minmax(300px, 1fr) 360px minmax(300px, 1fr); gap: 12px; align-items: start; }
+  @media (max-width: 1000px) { .surface { grid-template-columns: 1fr; } }
   .deck, .mixer { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-  .deck { display: grid; grid-template-columns: 1fr 56px; grid-template-rows: auto 1fr auto auto; gap: 10px; }
-  .deck.right { grid-template-columns: 56px 1fr; }
-  .deck.right .side { order: -1; }
-  .deck .top { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; justify-content: space-between; }
-  .deck .name { color: var(--dim); letter-spacing: .2em; font-size: 11px; }
-  .deck .side { display: flex; flex-direction: column; align-items: center; gap: 8px; grid-row: 2 / span 2; }
-  .deck .pads { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-  .deck .transport { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; }
+
+  /* the deck: explicit areas, so nothing can wander into the narrow column */
+  .deck { display: grid; gap: 10px; grid-template-columns: 1fr 60px;
+    grid-template-areas: "top top" "jog side" "pads pads" "transport transport"; }
+  .deck.right { grid-template-columns: 60px 1fr; grid-template-areas: "top top" "side jog" "pads pads" "transport transport"; }
+  .deck .top { grid-area: top; display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  .deck .top .btn { flex: 0 0 auto; min-width: 84px; }
+  .deck .name { color: var(--dim); letter-spacing: .2em; font-size: 11px; flex: 1; }
+  .deck.right .name { text-align: right; order: 3; }
+  .deck .jogwrap { grid-area: jog; display: flex; align-items: center; justify-content: center; }
+  .deck .side { grid-area: side; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .deck .pads { grid-area: pads; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .deck .transport { grid-area: transport; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 
   .btn { background: var(--panel2); border: 1px solid #333; border-radius: 8px; color: var(--text);
-    padding: 10px 6px; text-align: center; font-size: 11px; font-weight: 600; letter-spacing: .06em;
-    cursor: pointer; position: relative; min-height: 40px; display: flex; align-items: center; justify-content: center; }
+    padding: 8px 6px; text-align: center; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    cursor: pointer; position: relative; min-height: 38px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; --accent: #bbb; transition: box-shadow .08s, background .08s; }
   .btn small { display: block; color: var(--dim); font-weight: 400; font-size: 9px; letter-spacing: 0; margin-top: 2px; }
-  .btn:active, .btn.down { background: #2b2b30; border-color: #555; transform: translateY(1px); }
-  .btn.red.down, .btn.red:active { background: var(--red); border-color: var(--red2); color: #fff; }
-  .btn.green.down, .btn.green:active { background: var(--green); border-color: #7cf0b0; color: #062; }
-  .btn.amber.down, .btn.amber:active { background: var(--amber); color: #321; }
-  .btn.blue.down, .btn.blue:active { background: var(--blue); color: #fff; }
-  .btn.big { min-height: 56px; font-size: 12px; }
-  .btn.pad { min-height: 64px; background: #202024; border-radius: 6px; }
-  .btn.pad.down, .btn.pad:active { background: #2fb0ff; color: #012; }
-  .btn.mode { min-height: 30px; padding: 6px; font-size: 10px; }
-  .btn.toggle.on { background: var(--red); border-color: var(--red2); color: #fff; }
+  .btn.down { transform: translateY(1px); border-color: #666; background: #2b2b30; }
+  /* lit = what Engine says; down = what the finger does */
+  .btn.lit { background: var(--accent); color: #111; border-color: transparent; box-shadow: 0 0 14px var(--accent); }
+  .btn.lit small { color: rgba(0,0,0,.55); }
+  .btn.lit.dimmed { background: color-mix(in srgb, var(--accent) 35%, #1e1e21); color: #ddd; box-shadow: none; }
+  .btn.red   { --accent: var(--red2); }
+  .btn.green { --accent: var(--green); }
+  .btn.amber { --accent: var(--amber); }
+  .btn.blue  { --accent: var(--blue); }
+  .btn.cyan  { --accent: var(--cyan); }
+  .btn.big { min-height: 54px; font-size: 12px; }
+  .btn.pad { min-height: 58px; border-radius: 6px; background: #1b1b1f; --accent: var(--cyan); }
+  .btn.mode { min-height: 28px; padding: 5px; font-size: 10px; }
+  .btn.sq { width: 60px; min-height: 34px; padding: 4px; }
 
-  .jog { width: 100%; max-width: 300px; aspect-ratio: 1; margin: 0 auto; border-radius: 50%;
-    background: radial-gradient(circle at 50% 50%, #26262a 0 38%, #101012 39% 41%, #1c1c1f 42% 92%, #0a0a0b 93%);
-    border: 1px solid #333; position: relative; cursor: grab; touch-action: none;
-    box-shadow: inset 0 0 40px #000, 0 6px 20px #000; }
+  .jog { width: min(100%, 280px); aspect-ratio: 1; border-radius: 50%; position: relative; cursor: grab;
+    background: radial-gradient(circle at 50% 50%, #26262a 0 36%, #0e0e10 37% 39%, #1b1b1e 40% 93%, #0a0a0b 94%);
+    border: 1px solid #333; box-shadow: inset 0 0 40px #000, 0 6px 20px #000; }
   .jog.touched { box-shadow: inset 0 0 40px #000, 0 0 0 3px var(--red); }
-  .jog .mark { position: absolute; left: 50%; top: 8%; width: 3px; height: 14%; margin-left: -1.5px;
-    background: var(--red); border-radius: 2px; transform-origin: 50% 300%; }
+  .jog .mark { position: absolute; left: 50%; top: 7%; width: 3px; height: 13%; margin-left: -1.5px;
+    background: var(--red); border-radius: 2px; transform-origin: 50% 330%; }
   .jog .label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     flex-direction: column; color: var(--dim); font-size: 10px; letter-spacing: .1em; pointer-events: none; }
   .jog .label b { color: var(--text); font-size: 13px; }
 
-  .vfader { width: 44px; height: 220px; background: var(--panel2); border: 1px solid #333; border-radius: 6px;
-    position: relative; cursor: ns-resize; touch-action: none; }
+  .vfader { width: 44px; height: 200px; background: var(--panel2); border: 1px solid #333; border-radius: 6px;
+    position: relative; cursor: ns-resize; }
+  .vfader.short { height: 150px; } .vfader.mixer { height: 130px; width: 40px; }
   .vfader .track { position: absolute; left: 50%; top: 10px; bottom: 10px; width: 3px; margin-left: -1.5px; background: #000; }
-  .vfader .cap { position: absolute; left: 4px; right: 4px; height: 22px; margin-top: -11px; background: #3a3a40;
+  .vfader .cap { position: absolute; left: 4px; right: 4px; height: 20px; margin-top: -10px; background: #3a3a40;
     border: 1px solid #666; border-radius: 3px; box-shadow: 0 2px 6px #000; }
   .vfader .cap::after { content: ""; position: absolute; left: 6px; right: 6px; top: 50%; height: 2px; background: #ddd; }
   .vfader .centre { position: absolute; left: 6px; right: 6px; top: 50%; height: 1px; background: #444; }
-  .vfader.short { height: 160px; }
-  .hfader { height: 44px; width: 100%; background: var(--panel2); border: 1px solid #333; border-radius: 6px;
-    position: relative; cursor: ew-resize; touch-action: none; }
+  .hfader { height: 40px; width: 100%; background: var(--panel2); border: 1px solid #333; border-radius: 6px; position: relative; cursor: ew-resize; }
   .hfader .track { position: absolute; top: 50%; left: 10px; right: 10px; height: 3px; margin-top: -1.5px; background: #000; }
-  .hfader .cap { position: absolute; top: 4px; bottom: 4px; width: 26px; margin-left: -13px; background: #3a3a40;
-    border: 1px solid #666; border-radius: 3px; }
+  .hfader .cap { position: absolute; top: 4px; bottom: 4px; width: 26px; margin-left: -13px; background: #3a3a40; border: 1px solid #666; border-radius: 3px; }
   .hfader .cap::after { content: ""; position: absolute; top: 6px; bottom: 6px; left: 50%; width: 2px; background: #ddd; }
   .lab { color: var(--dim); font-size: 9px; letter-spacing: .12em; text-align: center; text-transform: uppercase; }
 
-  .knob { width: 46px; height: 46px; border-radius: 50%; margin: 0 auto; position: relative; cursor: ns-resize; touch-action: none;
-    background: radial-gradient(circle at 50% 40%, #3a3a40, #17171a 70%); border: 1px solid #444; box-shadow: 0 3px 8px #000; }
-  .knob .ptr { position: absolute; left: 50%; top: 4px; width: 3px; height: 14px; margin-left: -1.5px; background: #fff; border-radius: 2px;
-    transform-origin: 50% 19px; }
-  .knob .ring { position: absolute; inset: -5px; border-radius: 50%; border: 2px solid transparent; }
-  .knob.centre .ring { border-top-color: #444; }
-  .kw { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .kw { display: flex; flex-direction: column; align-items: center; gap: 2px; }
   .kw .val { color: var(--dim); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .knob { width: 38px; height: 38px; border-radius: 50%; position: relative; cursor: ns-resize;
+    background: radial-gradient(circle at 50% 40%, #3a3a40, #17171a 70%); border: 1px solid #444; box-shadow: 0 3px 8px #000; }
+  .knob .ptr { position: absolute; left: 50%; top: 3px; width: 3px; height: 12px; margin-left: -1.5px; background: #fff; border-radius: 2px; transform-origin: 50% 16px; }
 
-  .mixer { display: flex; flex-direction: column; gap: 12px; }
+  .mixer { display: flex; flex-direction: column; gap: 10px; }
   .row { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
   .row.center { justify-content: center; align-items: center; }
-  .col { display: flex; flex-direction: column; gap: 8px; align-items: center; }
-  .strip { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px;
-    background: #121214; border: 1px solid var(--line); border-radius: 8px; padding: 8px 6px; }
+  .col { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+  .strip { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    background: #111113; border: 1px solid var(--line); border-radius: 8px; padding: 8px 6px; }
   .strip .ch { color: var(--dim); font-size: 10px; letter-spacing: .2em; }
-  .encoder { width: 84px; height: 84px; border-radius: 50%; cursor: pointer; touch-action: none; position: relative;
+  .strip .knobs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; justify-items: center; }
+  .strip .knobs .btn { align-self: center; width: 100%; }
+  .mid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; padding-top: 22px; }
+  .strip .bottom { display: flex; gap: 6px; align-items: flex-end; }
+  .vu { width: 10px; height: 130px; background: #0a0a0a; border: 1px solid #333; border-radius: 3px; display: flex; flex-direction: column-reverse; gap: 2px; padding: 3px 2px; }
+  .vu i { display: block; flex: 1; background: #1c1c1f; border-radius: 1px; }
+  .vu i.on { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .vu i:nth-child(5).on { background: var(--amber); box-shadow: 0 0 5px var(--amber); }
+  .vu i:nth-child(6).on { background: var(--red2); box-shadow: 0 0 5px var(--red2); }
+  .encoder { width: 78px; height: 78px; border-radius: 50%; cursor: pointer; position: relative;
     background: radial-gradient(circle at 50% 40%, #333, #141416 75%); border: 1px solid #555; box-shadow: 0 4px 12px #000; }
-  .encoder.down { background: radial-gradient(circle at 50% 40%, #444, #1a1a1c 75%); border-color: var(--red); }
-  .encoder .ptr { position: absolute; left: 50%; top: 6px; width: 4px; height: 16px; margin-left: -2px; background: #fff; border-radius: 2px; transform-origin: 50% 36px; }
-  .encoder .hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 9px; text-align: center; pointer-events: none; }
+  .encoder.down { border-color: var(--red); }
+  .encoder .ptr { position: absolute; left: 50%; top: 6px; width: 4px; height: 14px; margin-left: -2px; background: #fff; border-radius: 2px; transform-origin: 50% 33px; }
+  .encoder .hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 9px; text-align: center; pointer-events: none; line-height: 1.25; }
   .fx { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
   .paddles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .sep { height: 1px; background: var(--line); }
 
   footer { position: fixed; left: 0; right: 0; bottom: 0; background: #0f0f10; border-top: 1px solid var(--line);
-    padding: 6px 16px; display: flex; gap: 16px; align-items: center; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--dim); }
+    padding: 6px 14px; display: flex; gap: 16px; align-items: center; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--dim); }
   footer .log { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #bbb; }
-  footer .err { color: var(--red2); }
+  footer .in { color: var(--green); }
   kbd { background: #222; border: 1px solid #444; border-radius: 3px; padding: 0 4px; color: #ccc; }
 </style>
 </head>
 <body>
 <header>
   <h1>NUMARK <span>MIXSTREAM PRO</span> · virtual surface</h1>
-  <div class="st">bridge: <b id="conn" class="off">connecting…</b> · <span id="sent">0</span> bytes</div>
+  <div class="st">bridge: <b id="conn" class="off">connecting…</b> · out <span id="sent">0</span> B · LEDs: <b id="evconn" class="off">—</b></div>
 </header>
 
 <div class="surface">
@@ -141,13 +155,14 @@
 </div>
 
 <footer>
-  <span>last:</span><span class="log" id="log">—</span>
-  <span>hold <kbd>shift</kbd> = SHIFT · double-click a knob to centre it</span>
+  <span>out:</span><span class="log" id="log">—</span>
+  <span>in:</span><span class="log in" id="login">—</span>
+  <span><kbd>shift</kbd> SHIFT · <kbd>space</kbd> play 1 · <kbd>↵</kbd> load 1 · <kbd>↑↓</kbd> browse · dbl-click knob = centre</span>
 </footer>
 
 <script>
 'use strict';
-// ---------------------------------------------------------------- transport
+// ---------------------------------------------------------------- out: the surface -> Engine
 const hex = n => n.toString(16).padStart(2, '0');
 let queue = [], flushing = false, sentBytes = 0;
 function midi(...bytes) {
@@ -161,8 +176,7 @@ async function flush() {
     const body = queue.splice(0).join('');           // coalesce whatever piled up
     try {
       const r = await fetch('/midi', { method: 'POST', body, keepalive: true });
-      if (r.ok) { sentBytes += body.length / 2; setConn(true); }
-      else setConn(false, await r.text());
+      if (r.ok) { sentBytes += body.length / 2; setConn(true); } else setConn(false, await r.text());
     } catch (e) { setConn(false, e.message); }
   }
   flushing = false;
@@ -183,15 +197,37 @@ const noteOff = (ch, n)          => midi(0x80 | ch, n, 0);
 const cc      = (ch, c, v)       => midi(0xB0 | ch, c, Math.max(0, Math.min(127, v | 0)));
 const cc14    = (ch, msb, lsb, v) => { v = Math.max(0, Math.min(16383, v | 0)); cc(ch, msb, v >> 7); cc(ch, lsb, v & 127); };
 
+// ---------------------------------------------------------------- in: Engine -> the surface (LEDs, VU)
+const leds = {};                                     // "n:ch:note" -> [elements], "c:ch:cc" -> [fn]
+function onLed(key, el) { (leds[key] = leds[key] || []).push(el); }
+function applyLed(key, v) {
+  for (const t of leds[key] || []) {
+    if (typeof t === 'function') { t(v); continue; }
+    t.classList.toggle('lit', v > 0);
+    t.classList.toggle('dimmed', v > 0 && v < 32);   // a dim colour is Engine's "available but off"
+    t.title = key + ' = ' + v;
+  }
+}
+function listen() {
+  const es = new EventSource('/events');
+  const ind = document.getElementById('evconn');
+  es.addEventListener('state', e => { const st = JSON.parse(e.data); for (const k in st) applyLed(k, st[k]);
+    ind.textContent = 'live'; ind.className = ''; });
+  es.onmessage = e => { const m = JSON.parse(e.data); applyLed(m.k, m.v);
+    document.getElementById('login').textContent = m.k + ' = ' + m.v; };
+  es.onerror = () => { ind.textContent = 'reconnecting'; ind.className = 'off'; };
+}
+listen();
+
 // ---------------------------------------------------------------- the map (NH08_Controller_Assignments.qml)
-const G = 15;                                        // global channel
+const G = 15;
 const DECK = { L: { ch: 2, load: 1, name: 'DECK 1' }, R: { ch: 3, load: 2, name: 'DECK 2' } };
-const MIX  = { L: 0, R: 1 };                         // mixer channel 1 / 2
+const MIX  = { L: 0, R: 1 };
 const N = { back: 3, push: 6, menu: 7, view: 16, soundswitch: 34,
             sync: 8, cue: 9, play: 10, modes: [11, 12, 14, 13], pad0: 15, shift: 28,
             bendMinus: 29, bendPlus: 30, jogTouch: 33, vinyl: 35, pfl: 13 };
 const C = { browse: 5, xfader: 14, master: 15, cueMix: 9, cueGain: 10, speaker: 17,
-            trim: 3, hi: 4, mid: 6, low: 8, sweep: 11, fader: 14,
+            trim: 3, hi: 4, mid: 6, low: 8, sweep: 11, fader: 14, vu: [32, 33],
             jogMsb: 0x37, jogLsb: 0x4D, speedMsb: 0x1F, speedLsb: 0x4B };
 const FX = { ch: 4, select: ['ECHO', 'FLANGER', 'DELAY', 'PHASER'], paddle: 4, paddleR: 5 };
 
@@ -203,18 +239,18 @@ function button(label, ch, note, cls = '', sub = '') {
   b.addEventListener('pointerdown', e => { e.preventDefault(); b.classList.add('down'); noteOn(ch, note); b.setPointerCapture(e.pointerId); });
   const up = () => { if (b.classList.contains('down')) { b.classList.remove('down'); noteOff(ch, note); } };
   b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('lostpointercapture', up);
+  onLed(`n:${ch}:${note}`, b);                       // Engine lights it on the same channel and note
   return b;
 }
 
 function knob(label, ch, ccNum, { centre = false, init } = {}) {
-  const w = el('div', 'kw'); const k = el('div', 'knob' + (centre ? ' centre' : ''));
-  k.innerHTML = '<div class="ring"></div><div class="ptr"></div>';
+  const w = el('div', 'kw'); const k = el('div', 'knob', '<div class="ptr"></div>');
   const val = el('div', 'val'); w.append(k, el('div', 'lab', label), val);
-  let v = init != null ? init : (centre ? 64 : 0), y0, v0;
+  let v = init != null ? init : (centre ? 64 : 0), y0 = null, v0;
   const show = () => { k.querySelector('.ptr').style.transform = `rotate(${(v / 127) * 270 - 135}deg)`; val.textContent = v; };
   const set = nv => { nv = Math.max(0, Math.min(127, Math.round(nv))); if (nv !== v) { v = nv; show(); cc(ch, ccNum, v); } };
   k.addEventListener('pointerdown', e => { e.preventDefault(); y0 = e.clientY; v0 = v; k.setPointerCapture(e.pointerId); });
-  k.addEventListener('pointermove', e => { if (y0 == null) return; set(v0 + (y0 - e.clientY) * (e.shiftKey ? 0.2 : 0.8)); });
+  k.addEventListener('pointermove', e => { if (y0 != null) set(v0 + (y0 - e.clientY) * (e.shiftKey ? 0.2 : 0.8)); });
   const end = () => { y0 = null; };
   k.addEventListener('pointerup', end); k.addEventListener('pointercancel', end);
   k.addEventListener('dblclick', () => set(centre ? 64 : 0));
@@ -228,9 +264,9 @@ function vfader(label, ch, msb, lsb, { centre = false, init, cls = '' } = {}) {
   const w = el('div', 'col'); const f = el('div', 'vfader ' + cls);
   f.innerHTML = '<div class="track"></div>' + (centre ? '<div class="centre"></div>' : '') + '<div class="cap"></div>';
   const max = lsb != null ? 16383 : 127;
-  let v = init != null ? init : (centre ? max >> 1 : (lsb != null ? max >> 1 : 0));
+  let v = init != null ? init : (centre ? max >> 1 : 0);
   const cap = f.querySelector('.cap');
-  const show = () => { const r = f.getBoundingClientRect(); const h = (r.height || 220) - 20; cap.style.top = (10 + h * (1 - v / max)) + 'px'; };
+  const show = () => { const h = f.clientHeight - 20; cap.style.top = (10 + h * (1 - v / max)) + 'px'; };
   const set = nv => { nv = Math.max(0, Math.min(max, Math.round(nv))); if (nv !== v) { v = nv; show(); lsb != null ? cc14(ch, msb, lsb, v) : cc(ch, msb, v); } };
   const fromY = y => { const r = f.getBoundingClientRect(); return max * (1 - (y - r.top - 10) / (r.height - 20)); };
   let dragging = false;
@@ -245,10 +281,9 @@ function vfader(label, ch, msb, lsb, { centre = false, init, cls = '' } = {}) {
 }
 
 function hfader(label, ch, ccNum) {
-  const w = el('div', 'col'); w.style.width = '100%'; const f = el('div', 'hfader');
-  f.innerHTML = '<div class="track"></div><div class="cap"></div>';
+  const w = el('div', 'col'); w.style.width = '100%'; const f = el('div', 'hfader', '<div class="track"></div><div class="cap"></div>');
   let v = 64; const cap = f.querySelector('.cap');
-  const show = () => { const r = f.getBoundingClientRect(); cap.style.left = (10 + ((r.width || 300) - 20) * (v / 127)) + 'px'; };
+  const show = () => { cap.style.left = (10 + (f.clientWidth - 20) * (v / 127)) + 'px'; };
   const set = nv => { nv = Math.max(0, Math.min(127, Math.round(nv))); if (nv !== v) { v = nv; show(); cc(ch, ccNum, v); } };
   const fromX = x => { const r = f.getBoundingClientRect(); return 127 * (x - r.left - 10) / (r.width - 20); };
   let dragging = false;
@@ -262,40 +297,41 @@ function hfader(label, ch, ccNum) {
   return w;
 }
 
+// The VU meter Engine drives: CC 32/33 on the global channel, six segments
+// at the ledCCValues of the assignment file, 0 14 27 40 53 66.
+function vu(ccNum) {
+  const v = el('div', 'vu'); for (let i = 0; i < 6; i++) v.append(el('i'));
+  const steps = [0, 14, 27, 40, 53, 66];
+  onLed(`c:${G}:${ccNum}`, val => { [...v.children].forEach((seg, i) => seg.classList.toggle('on', i > 0 && val >= steps[i])); });
+  return v;
+}
+
 // The jog wheel: a 14-bit position that wraps, like an encoder, plus the touch
-// note while a finger is on it. The HighSpeedJogWheelAssignment in Engine
-// takes the difference between successive positions, so what matters is the
-// direction and how fast the value moves, not its absolute value.
+// note while a finger is on it. Engine takes the difference between successive
+// positions, so direction and speed matter, not the absolute value.
 function jog(d) {
-  const j = el('div', 'jog'); j.innerHTML = '<div class="mark"></div><div class="label"><b>' + d.name + '</b><span>JOG</span></div>';
+  const j = el('div', 'jog', '<div class="mark"></div><div class="label"><b>' + d.name + '</b><span>JOG</span></div>');
   const mark = j.querySelector('.mark');
   let pos = 0, lastAngle = null, ang = 0, touched = false;
   const angleOf = e => { const r = j.getBoundingClientRect(); return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)); };
-  const TICKS_PER_TURN = 16384 / 4;   // a quarter of the 14-bit range per revolution, tune to taste
+  const TICKS_PER_TURN = 16384 / 4;
+  const move = da => { ang += da; mark.style.transform = `rotate(${ang * 180 / Math.PI}deg)`;
+    pos = (pos + Math.round(da / (2 * Math.PI) * TICKS_PER_TURN) + 16384) % 16384; cc14(d.ch, C.jogMsb, C.jogLsb, pos); };
   j.addEventListener('pointerdown', e => { e.preventDefault(); touched = true; j.classList.add('touched'); lastAngle = angleOf(e);
     j.setPointerCapture(e.pointerId); noteOn(d.ch, N.jogTouch); });
-  j.addEventListener('pointermove', e => {
-    if (!touched) return;
-    const a = angleOf(e); let da = a - lastAngle; lastAngle = a;
-    if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
-    ang += da; mark.style.transform = `rotate(${ang * 180 / Math.PI}deg)`;
-    pos = (pos + Math.round(da / (2 * Math.PI) * TICKS_PER_TURN) + 16384) % 16384;
-    cc14(d.ch, C.jogMsb, C.jogLsb, pos);
-  });
+  j.addEventListener('pointermove', e => { if (!touched) return; const a = angleOf(e); let da = a - lastAngle; lastAngle = a;
+    if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI; move(da); });
   const end = () => { if (touched) { touched = false; j.classList.remove('touched'); noteOff(d.ch, N.jogTouch); } };
   j.addEventListener('pointerup', end); j.addEventListener('pointercancel', end);
-  j.addEventListener('wheel', e => { e.preventDefault(); const step = Math.sign(e.deltaY) * 40;
-    pos = (pos + step + 16384) % 16384; ang += step / TICKS_PER_TURN * 2 * Math.PI;
-    mark.style.transform = `rotate(${ang * 180 / Math.PI}deg)`; cc14(d.ch, C.jogMsb, C.jogLsb, pos); }, { passive: false });
-  return j;
+  j.addEventListener('wheel', e => { e.preventDefault(); move(Math.sign(e.deltaY) * 2 * Math.PI / 60); }, { passive: false });
+  const wrap = el('div', 'jogwrap'); wrap.append(j); return wrap;
 }
 
 // The browse encoder: relative CC, 1 = one step down, 127 = one step up; a click is the push note.
 function encoder() {
-  const e = el('div', 'encoder'); e.innerHTML = '<div class="ptr"></div><div class="hint">BROWSE<br>drag · scroll<br>click = push</div>';
+  const e = el('div', 'encoder', '<div class="ptr"></div><div class="hint">BROWSE<br>drag · scroll<br>click = push</div>');
   const ptr = e.querySelector('.ptr'); let ang = 0, y0 = null, acc = 0, moved = false;
-  const step = n => { for (let i = 0; i < Math.abs(n); i++) cc(G, C.browse, n > 0 ? 1 : 127);
-    ang += n * 15; ptr.style.transform = `rotate(${ang}deg)`; };
+  const step = n => { for (let i = 0; i < Math.abs(n); i++) cc(G, C.browse, n > 0 ? 1 : 127); ang += n * 15; ptr.style.transform = `rotate(${ang}deg)`; };
   e.addEventListener('pointerdown', ev => { ev.preventDefault(); y0 = ev.clientY; acc = 0; moved = false; e.setPointerCapture(ev.pointerId); });
   e.addEventListener('pointermove', ev => { if (y0 == null) return; acc += (ev.clientY - y0); y0 = ev.clientY;
     const n = Math.trunc(acc / 14); if (n) { moved = true; acc -= n * 14; step(n); } });
@@ -311,10 +347,10 @@ function buildDeck(side) {
   const d = DECK[side]; const root = document.getElementById(side === 'L' ? 'deckL' : 'deckR');
   const top = el('div', 'top');
   top.append(el('div', 'name', d.name + ' · ch ' + d.ch),
-             button('VINYL', d.ch, N.vinyl, 'toggle', 'note 35'),
+             button('VINYL', d.ch, N.vinyl, 'amber', 'note 35'),
              button('LOAD', G, d.load, 'red', 'ch 15 · note ' + d.load));
   const side_ = el('div', 'side');
-  side_.append(button('−', d.ch, N.bendMinus, 'mode', 'bend'), button('+', d.ch, N.bendPlus, 'mode', 'bend'),
+  side_.append(button('−', d.ch, N.bendMinus, 'sq', 'bend'), button('+', d.ch, N.bendPlus, 'sq', 'bend'),
                vfader('PITCH', d.ch, C.speedMsb, C.speedLsb, { centre: true, cls: 'short' }));
   const pads = el('div', 'pads');
   const modeNames = ['HOT CUE', 'AUTO LOOP', 'FADER CUTS', 'ROLL'];
@@ -328,29 +364,27 @@ function buildDeck(side) {
 
 function buildMixer() {
   const m = document.getElementById('mixer');
-  // FX
-  const fx = el('div', 'fx'); FX.select.forEach((n, i) => fx.append(button(n, FX.ch, i, 'mode', 'ch 4 · note ' + i)));
+  const fx = el('div', 'fx'); FX.select.forEach((n, i) => fx.append(button(n, FX.ch, i, 'mode cyan', 'ch 4 · note ' + i)));
   const paddles = el('div', 'paddles');
-  paddles.append(button('FX ON · CH 1', FX.ch, FX.paddle, 'red', 'paddle, ch 4 note 4'),
-                 button('FX ON · CH 2', FX.paddleR, FX.paddle, 'red', 'paddle, ch 5 note 4'));
-  // browse block
-  const browse = el('div', 'row center'); browse.style.gap = '14px';
+  paddles.append(button('FX ON · CH 1', FX.ch, FX.paddle, 'red', 'paddle · ch 4 note 4'),
+                 button('FX ON · CH 2', FX.paddleR, FX.paddle, 'red', 'paddle · ch 5 note 4'));
+  const browse = el('div', 'row center'); browse.style.gap = '12px';
   const leftCol = el('div', 'col'); leftCol.append(button('BACK', G, N.back, 'mode', 'note 3'), button('VIEW', G, N.view, 'mode', 'note 16'));
-  const rightCol = el('div', 'col'); rightCol.append(button('MENU', G, N.menu, 'mode', 'note 7'), button('SOUNDSWITCH', G, N.soundswitch, 'mode', 'note 34'));
+  const rightCol = el('div', 'col'); rightCol.append(button('MENU', G, N.menu, 'mode', 'note 7'), button('S.SWITCH', G, N.soundswitch, 'mode', 'note 34'));
   browse.append(leftCol, encoder(), rightCol);
-  // channel strips
   const strips = el('div', 'row');
   ['L', 'R'].forEach((s, i) => {
     const ch = MIX[s]; const st = el('div', 'strip');
-    st.append(el('div', 'ch', 'CH ' + (i + 1) + ' · midi ' + ch),
-              knob('TRIM', ch, C.trim, { centre: true }), knob('HI', ch, C.hi, { centre: true }),
-              knob('MID', ch, C.mid, { centre: true }), knob('LOW', ch, C.low, { centre: true }),
-              knob('SWEEP FX', ch, C.sweep, { centre: true }),
-              button('PFL', ch, N.pfl, 'mode toggle', 'note 13'),
-              vfader('LEVEL', ch, C.fader, null, { init: 100 }));
+    const bottom = el('div', 'bottom');
+    bottom.append(vu(C.vu[i]), vfader('LEVEL', ch, C.fader, null, { init: 100, cls: 'mixer' }));
+    const knobs = el('div', 'knobs');
+    knobs.append(knob('TRIM', ch, C.trim, { centre: true }), knob('HI', ch, C.hi, { centre: true }),
+                 knob('MID', ch, C.mid, { centre: true }), knob('LOW', ch, C.low, { centre: true }),
+                 knob('SWEEP FX', ch, C.sweep, { centre: true }), button('PFL', ch, N.pfl, 'mode green', 'note 13'));
+    st.append(el('div', 'ch', 'CH ' + (i + 1) + ' · midi ' + ch), knobs, bottom);
     strips.append(st);
     if (i === 0) {
-      const mid = el('div', 'col'); mid.style.justifyContent = 'flex-start'; mid.style.paddingTop = '24px';
+      const mid = el('div', 'mid');
       mid.append(knob('MASTER', G, C.master, { init: 90 }), knob('CUE MIX', G, C.cueMix, { centre: true }),
                  knob('CUE GAIN', G, C.cueGain, { init: 70 }), knob('SPEAKER', G, C.speaker, { init: 64 }));
       strips.append(mid);
@@ -361,15 +395,15 @@ function buildMixer() {
 
 buildDeck('L'); buildMixer(); buildDeck('R');
 
-// Keyboard: shift key holds both SHIFT buttons, space plays deck 1, enter loads deck 1.
+// Keyboard: shift holds both SHIFT buttons, space plays deck 1, enter loads deck 1, arrows browse.
 let shiftHeld = false;
 window.addEventListener('keydown', e => {
   if (e.repeat) return;
   if (e.key === 'Shift' && !shiftHeld) { shiftHeld = true; noteOn(DECK.L.ch, N.shift); noteOn(DECK.R.ch, N.shift); }
   if (e.code === 'Space') { e.preventDefault(); noteOn(DECK.L.ch, N.play); }
   if (e.key === 'Enter') noteOn(G, DECK.L.load);
-  if (e.key === 'ArrowDown') cc(G, C.browse, 1);
-  if (e.key === 'ArrowUp') cc(G, C.browse, 127);
+  if (e.key === 'ArrowDown') { e.preventDefault(); cc(G, C.browse, 1); }
+  if (e.key === 'ArrowUp') { e.preventDefault(); cc(G, C.browse, 127); }
 });
 window.addEventListener('keyup', e => {
   if (e.key === 'Shift') { shiftHeld = false; noteOff(DECK.L.ch, N.shift); noteOff(DECK.R.ch, N.shift); }
