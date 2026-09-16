@@ -24,7 +24,8 @@ No firmware is included in this repository. See [Obtaining the firmware](#obtain
 | **Engine DJ graphical interface on screen** | **working** |
 | "Incompatible Format" dialog at startup | removed with a udev rule |
 | **Interface navigable with mouse and touch** | **working** |
-| Audio, control surface, jog wheels | not possible, the physical hardware is absent |
+| Audio, jog wheels | not possible, the physical hardware is absent |
+| **Loading and playing a track** | **working**, through a virtual control surface |
 
 ![Engine DJ running in a native window](_vm/window-native.png)
 
@@ -284,11 +285,51 @@ script:
   same length, NUL padded. The check guards the DRI interface, which does not change between
   maintenance releases of one stable series.
 
+## Loading a track: the virtual control surface
+
+Engine's touchscreen has no gesture that loads a track into a deck. On the device that is a
+button, LOAD is MIDI from the control surface's microcontroller, and so are PLAY, CUE and the
+browse encoder. Without a surface the library can be browsed and previewed and nothing else,
+and a touch on a track that Engine's own database still lists but that no longer exists gives
+the `FILE_DOES_NOT_EXIST` in the log, not a loading bug.
+
+`_tools/snd-combined.c` provides the surface. It is the virtual sound card of section 12 of
+the teardown with a second card added, called `Control Surface` like the real UART port, and
+that card is a crossover: whatever is written to its second MIDI device arrives as input on the
+first, the one Engine opens. Three things had to be learnt from Engine before it would bind its
+assignment file to that port, and the module handles all three:
+
+- Engine sends a MIDI Identity Request to every port and binds nothing until one answers with
+  the reply its `KnownDevices.xml` expects, `7E ?? 06 02 00 01 3F 3F ...`: inMusic's
+  manufacturer id and family `3F`. It asks three times in the first half minute and then stops.
+  The module answers on the spot.
+- The last four free bytes of that reply are read as the surface's firmware version, and it has
+  to be **equal** to the one shipped in `/usr/Engine/Firmware/NH08 Controller/firmware.json`,
+  1.0.0.49. Newer is as bad as older: `version mismatch; starting updater`, and Engine quits into
+  the firmware updater. `identity=` on the module changes the bytes for another image.
+- Engine pairs an output port with whichever input answers first. If the inject device had an
+  input side it would get the request echoed into it and win that race, so it has none.
+
+```bash
+docker exec engine-os-emu bash /work/_tools/snd-combined-build.sh   # once, in the container
+docker cp engine-os-emu:/work/_vm/snd-combined.ko _vm/
+MESA24=1 bash _tools/engine-run.sh      # loads the card before Engine when the .ko is in _vm
+bash _tools/surface.sh browse 2         # the browse encoder, two steps down
+bash _tools/surface.sh push             # enter the folder
+bash _tools/surface.sh load 1           # LOAD deck 1: analysis, waveform, beatgrid
+bash _tools/surface.sh play 1
+```
+
+`surface.sh` takes its note and channel numbers from the product's own assignment file in the
+rootfs, and `raw`, `note` and `cc` send anything else. There is still no audio: the card's PCM
+carries no samples, so the deck plays into nothing, but everything Engine does around a playing
+track, analysis, waveform, beatgrid, key, time, is there to see.
+
 ## What will never work under emulation
 
-Audio (a custom I2S codec plus a separate XMOS DSP), the control surface (MIDI over UART to
-dedicated microcontrollers), jog wheels, motors, pads, and the ilitek touch panel are physical
-circuits of the device, not software. The update image also contains only the splash screens and
+Audio (a custom I2S codec plus a separate XMOS DSP), jog wheels, motors, pads, and the ilitek
+touch panel are physical circuits of the device, not software. The control surface is too, but
+its MIDI side can be stood in for, see above. The update image also contains only the splash screens and
 the rootfs: no bootloader, no `/data` partition, no user content.
 
 Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
@@ -317,8 +358,9 @@ Section 10 of [TEARDOWN.md](TEARDOWN.md) lists these in detail.
 | `docker/eos.sh` | drives the whole pipeline inside that container, from a non-Linux host |
 | `_tools/vm-run-macos.sh` | runs the VM with QEMU on a macOS host, no container in the loop |
 | `_tools/mac-app.sh` | builds a double-clickable Engine OS.app around those scripts |
-| `_tools/snd-combined.c` | virtual ALSA card with playback, capture and MIDI on one card, which is the shape Engine looks for |
+| `_tools/snd-combined.c` | virtual ALSA card with playback, capture and MIDI, plus a `Control Surface` MIDI card Engine binds its assignment to |
 | `_tools/snd-combined-build.sh` | cross builds that module against the guest kernel |
+| `_tools/surface.sh` | presses the surface's buttons: load, play, cue, browse, or any note or CC |
 
 ## Credits
 
