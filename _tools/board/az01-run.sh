@@ -22,7 +22,7 @@ PRODUCT="${PRODUCT:-NH08}"
 # wpa_supplicant of its own, and killing those by name takes the host down
 # with them (its system bus, and everything that talks to it).
 kill_chroot_daemons() {
-    for p in $(pidof connmand wpa_supplicant dbus-daemon); do
+    for p in $(pidof connmand wpa_supplicant dbus-daemon edisksd); do
         [ "$(readlink /proc/$p/root 2>/dev/null)" = "$R" ] && kill $p 2>/dev/null
     done
     true
@@ -51,6 +51,19 @@ grep -q ttyS0 $S/interrupts || sed '0,/eth0/s/eth0/ttyS0/' /proc/interrupts > $S
 # 2b. wlan0 belongs to the chroot's ConnMan, not to Armbian's supplicants
 systemctl stop wpa_supplicant 2>/dev/null || true
 pkill -f "wpa_supplicant -c /run/netplan" 2>/dev/null || true
+
+# 2c. what edisksd may see. It reads the udev database, and Engine puts up
+#     "Incompatible Format" for every ext4 device in it: the SD card Armbian
+#     runs from, its log2ram, the zram swap. The database is Armbian's, and
+#     its ID_FS_* properties are what mounts Armbian's root at boot, so it is
+#     not edited: the chroot gets an overlay of it in which those entries
+#     carry no filesystem, and a new USB stick still shows through from below.
+UD=$S/udev; rm -rf $UD; mkdir -p $UD/upper/data $UD/work
+for f in /run/udev/data/b*; do
+    case "$(grep '^E:ID_FS_TYPE=' $f 2>/dev/null | cut -d= -f2)" in
+        ext4|ext3|ext2|swap|btrfs|xfs|f2fs) grep -vE '^E:ID_FS_' $f > $UD/upper/data/$(basename $f) ;;
+    esac
+done
 
 # 3. the display
 systemctl stop getty@tty1 2>/dev/null || true
@@ -114,6 +127,9 @@ cat > $R/root/az01-inner.sh <<'INNER'
 mkdir -p /run/dbus
 [ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id
 dbus-daemon --system --fork
+# the drives: Engine asks edisksd over the bus for them, and the service file
+# activates it through systemd only (Exec=/bin/false), so it is started here
+(setsid /usr/libexec/edisksd < /dev/null > /root/edisksd.log 2>&1 &)
 # Wi-Fi: Engine asks ConnMan (net.connman), ConnMan drives wpa_supplicant,
 # both on this bus and both started by systemd on the real unit. Armbian has
 # let go of wlan0 already, and ConnMan is kept off the Ethernet cable this
@@ -144,7 +160,7 @@ mount -t proc proc $R/proc
 mount --rbind /sys $R/sys
 mount -t tmpfs tmpfs $R/tmp
 mount -t tmpfs tmpfs $R/run
-mkdir -p $R/run/udev; mount --bind /run/udev $R/run/udev
+mkdir -p $R/run/udev; mount -t overlay overlay -o lowerdir=/run/udev,upperdir=$UD/upper,workdir=$UD/work $R/run/udev
 mount --bind $S/dt/base $R/sys/firmware/devicetree/base
 mount --bind $S/interrupts $R/proc/interrupts
 exec chroot $R /bin/sh /root/az01-inner.sh $PRODUCT

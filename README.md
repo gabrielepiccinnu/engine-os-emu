@@ -372,6 +372,13 @@ identifies the surface and takes the audio card exactly as it does under QEMU. W
 board's display on top, with touch: one page for the screen, the buttons and the LEDs.
 `_tools/board/remote-web.py` is the display alone.
 
+A USB stick is a source as on the device: `edisksd` runs in the chroot too, its D-Bus service
+file being systemd-only (`Exec=/bin/false`). What it must not see is Armbian's own ext4 SD card,
+or Engine puts up "Incompatible Format"; the udev database it reads is Armbian's and its
+`ID_FS_*` properties are what mounts Armbian's root at boot, so it is not edited: the chroot
+gets an overlay of it in which the ext4 and swap entries carry no filesystem, and a stick plugged
+in later shows through from below.
+
 Two things the board taught: Wi-Fi works only with ConnMan and wpa_supplicant started in the
 chroot (Engine talks to `net.connman`, nothing else), and an RK3288 with no heatsink powers
 itself off on temperature within the hour if the GPU is pinned to `performance` as the real
