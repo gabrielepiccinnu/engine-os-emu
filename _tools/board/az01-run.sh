@@ -65,7 +65,10 @@ fi
 #     before Engine starts and udev must have labelled it a touchscreen.
 if [ -x /root/uinput-touch ] && ! pidof uinput-touch > /dev/null; then
     modprobe uinput 2>/dev/null || true
-    W=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d, -f1); H=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d, -f2)
+    # the size is the connected output's preferred mode, which is what Engine
+    # sets; fb0 keeps reporting the console's mode after fbcon is unbound
+    MODE=$(for c in /sys/class/drm/card0-*; do [ "$(cat $c/status)" = connected ] && head -n1 $c/modes && break; done)
+    W=${MODE%x*}; H=${MODE#*x}
     setsid /root/uinput-touch -w "${W:-1920}" -h "${H:-1080}" < /dev/null > /dev/null 2>&1 &
     sleep 2; udevadm settle --timeout=5 2>/dev/null || true
 fi

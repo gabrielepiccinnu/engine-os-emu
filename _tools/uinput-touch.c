@@ -19,10 +19,13 @@
  * Logs to /tmp/uinput-touch.log, which also serves to tell whether mouse
  * movements from the browser (noVNC) really reach the guest kernel.
  *
- * Synthetic taps, for testing without a mouse: write "x y" into the
- * /tmp/tapfifo fifo, coordinates in screen pixels.
+ * Synthetic touches, for testing without a mouse and for the remote
+ * desktop: lines written into the /tmp/tapfifo fifo, coordinates in screen
+ * pixels. "x y" is a tap; "d x y", "m x y" and "u" are a finger going down,
+ * moving and lifting, which is what a drag on the jog wheel or a fader is.
  *
  *   echo "400 900" > /tmp/tapfifo
+ *   printf "d 100 100\nm 300 100\nu\n" > /tmp/tapfifo
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -247,21 +250,32 @@ int main(int argc, char **argv)
         }
 
         if (ffd >= 0 && FD_ISSET(ffd, &rf)) {
-            char buf[128];
+            char buf[512];
             ssize_t n = read(ffd, buf, sizeof buf - 1);
             if (n > 0) {
-                int x, y;
+                char *line, *save;
                 buf[n] = 0;
-                if (sscanf(buf, "%d %d", &x, &y) == 2) {
-                    logp("synthetic tap %d,%d\n", x, y);
-                    touch_down(x, y);
-                    usleep(120000);
-                    touch_up();
+                for (line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+                    int x, y;
+                    if (sscanf(line, "d %d %d", &x, &y) == 2) {
+                        touch_down(clamp(x, scr_w - 1), clamp(y, scr_h - 1));
+                    } else if (sscanf(line, "m %d %d", &x, &y) == 2) {
+                        if (touching) touch_move(clamp(x, scr_w - 1), clamp(y, scr_h - 1));
+                    } else if (line[0] == 'u') {
+                        if (touching) touch_up();
+                    } else if (sscanf(line, "%d %d", &x, &y) == 2) {
+                        logp("synthetic tap %d,%d\n", x, y);
+                        touch_down(x, y);
+                        usleep(120000);
+                        touch_up();
+                    }
                 }
+            } else {
+                /* end of file: the writer went away, reopen for the next one.
+                 * A writer that stays (the remote desktop) keeps this open. */
+                close(ffd);
+                ffd = open("/tmp/tapfifo", O_RDONLY | O_NONBLOCK);
             }
-            /* the fifo closes with every writer: reopen it */
-            close(ffd);
-            ffd = open("/tmp/tapfifo", O_RDONLY | O_NONBLOCK);
         }
     }
     return 0;
