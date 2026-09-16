@@ -135,6 +135,15 @@
   .paddles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .sep { height: 1px; background: var(--line); }
 
+  /* the board's display, when the server is pointed at the board */
+  .screenwrap { display: none; margin: 0 0 12px; }
+  .screenwrap.on { display: flex; justify-content: center; }
+  .screen { position: relative; width: min(100%, 960px); aspect-ratio: 16 / 9; cursor: crosshair; background: #000;
+    border: 1px solid #2a2a2e; border-radius: 8px; overflow: hidden; box-shadow: 0 10px 40px #000; }
+  .screen img { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  .screen .finger { position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%;
+    border: 2px solid var(--green); background: rgba(61,220,132,.25); display: none; pointer-events: none; }
+  .screen.down .finger { display: block; }
   footer { position: fixed; left: 0; right: 0; bottom: 0; background: #0f0f10; border-top: 1px solid var(--line);
     padding: 6px 14px; display: flex; gap: 16px; align-items: center; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--dim); }
   footer .log { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #bbb; }
@@ -147,6 +156,10 @@
   <h1>NUMARK <span>MIXSTREAM PRO</span> · virtual surface</h1>
   <div class="st">bridge: <b id="conn" class="off">connecting…</b> · out <span id="sent">0</span> B · LEDs: <b id="evconn" class="off">—</b></div>
 </header>
+
+<div class="screenwrap" id="screenwrap">
+  <div class="screen" id="screen"><img id="screenimg" alt=""><div class="finger" id="finger"></div></div>
+</div>
 
 <div class="surface">
   <section class="deck left" id="deckL"></section>
@@ -218,6 +231,31 @@ function listen() {
   es.onerror = () => { ind.textContent = 'reconnecting'; ind.className = 'off'; };
 }
 listen();
+
+// ---------------------------------------------------------------- the board's display, with touch
+// Present only when the server runs with BOARD=1: /config answers, the MJPEG
+// comes from /stream, and a press, drag or release on the picture goes to
+// /touch in the board's own pixels, where the touch bridge makes it a finger.
+(async () => {
+  let c; try { c = await (await fetch('/config')).json(); } catch (e) { return; }
+  if (!c || !c.width) return;
+  const wrap = document.getElementById('screenwrap'), sc = document.getElementById('screen');
+  const img = document.getElementById('screenimg'), finger = document.getElementById('finger');
+  const W = c.width, H = c.height; let down = false, last = 0, q = [], busy = false;
+  sc.style.aspectRatio = W + ' / ' + H; img.src = c.mirror; wrap.classList.add('on');
+  const toBoard = ev => { const r = sc.getBoundingClientRect(); const k = Math.min(r.width / W, r.height / H);
+    const ox = (r.width - W * k) / 2, oy = (r.height - H * k) / 2;
+    finger.style.left = (ev.clientX - r.left) + 'px'; finger.style.top = (ev.clientY - r.top) + 'px';
+    return [Math.max(0, Math.min(W - 1, Math.round((ev.clientX - r.left - ox) / k))), Math.max(0, Math.min(H - 1, Math.round((ev.clientY - r.top - oy) / k)))]; };
+  const send = line => { q.push(line); if (!busy) flushT(); };
+  async function flushT() { busy = true; while (q.length) { const body = q.splice(0).join('\n');
+    try { await fetch('/touch', { method: 'POST', body, keepalive: true }); } catch (e) {} } busy = false; }
+  sc.addEventListener('pointerdown', ev => { ev.preventDefault(); down = true; sc.classList.add('down'); sc.setPointerCapture(ev.pointerId); const [x, y] = toBoard(ev); send(`d ${x} ${y}`); });
+  sc.addEventListener('pointermove', ev => { if (!down) return; const now = performance.now(); if (now - last < 30) return; last = now; const [x, y] = toBoard(ev); send(`m ${x} ${y}`); });
+  const up = () => { if (!down) return; down = false; sc.classList.remove('down'); send('u'); };
+  sc.addEventListener('pointerup', up); sc.addEventListener('pointercancel', up);
+  img.addEventListener('error', () => setTimeout(() => { img.src = c.mirror.split('?')[0] + '?' + Date.now(); }, 1500));
+})();
 
 // ---------------------------------------------------------------- the map (NH08_Controller_Assignments.qml)
 const G = 15;

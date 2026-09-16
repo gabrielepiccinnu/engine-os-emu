@@ -53,6 +53,27 @@
 #include <linux/platform_device.h>
 #include <linux/math64.h>
 #include <linux/timer.h>
+#include <linux/version.h>
+
+/* Built for two kernels: Debian's 6.1 under QEMU and Armbian's 6.18 on the
+ * Tinker Board. Between them the timer helpers were renamed and the
+ * platform driver's remove callback stopped returning anything. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+#define timer_container(ptr, type, member) timer_container_of(ptr, type, member)
+#define timer_stop_sync(t) timer_delete_sync(t)
+#define timer_stop(t) timer_delete(t)
+#else
+#define timer_container(ptr, type, member) from_timer(ptr, type, member)
+#define timer_stop_sync(t) del_timer_sync(t)
+#define timer_stop(t) del_timer(t)
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+#define REMOVE_RETURN void
+#define REMOVE_DONE return
+#else
+#define REMOVE_RETURN int
+#define REMOVE_DONE return 0
+#endif
 #include <linux/kfifo.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
@@ -102,7 +123,7 @@ struct combined_stream {
 
 static void combined_timer(struct timer_list *t)
 {
-	struct combined_stream *s = from_timer(s, t, timer);
+	struct combined_stream *s = timer_container(s, t, timer);
 
 	if (!s->running)
 		return;
@@ -162,7 +183,7 @@ static int combined_close(struct snd_pcm_substream *substream)
 	struct combined_stream *s = substream->runtime->private_data;
 
 	if (s) {
-		del_timer_sync(&s->timer);
+		timer_stop_sync(&s->timer);
 		kfree(s);
 	}
 	return 0;
@@ -198,7 +219,7 @@ static int combined_trigger(struct snd_pcm_substream *substream, int cmd)
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
 		s->running = false;
-		del_timer(&s->timer);
+		timer_stop(&s->timer);
 		return 0;
 	}
 	return -EINVAL;
@@ -599,14 +620,14 @@ static int combined_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int combined_remove(struct platform_device *pdev)
+static REMOVE_RETURN combined_remove(struct platform_device *pdev)
 {
 	struct combined_cards *cards = platform_get_drvdata(pdev);
 
 	if (cards->surface)
 		snd_card_free(cards->surface);
 	snd_card_free(cards->audio);
-	return 0;
+	REMOVE_DONE;
 }
 
 static struct platform_driver combined_driver = {

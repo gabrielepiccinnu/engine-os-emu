@@ -364,6 +364,19 @@ obvious: Armbian's kernel has `RT_GROUP_SCHED`, and under cgroup v2 an ssh sessi
 refused `SCHED_FIFO`, which Engine treats as fatal for its audio thread. The launcher moves
 itself into the root cgroup first.
 
+The surface is there too: `_tools/board/snd-combined-board-build.sh` builds the same module
+against Armbian's kernel (its headers are one patch level ahead of the board and the package
+ships no host tools, both dealt with in the script), the launcher loads it, and Engine
+identifies the surface and takes the audio card exactly as it does under QEMU. With
+`BOARD=1 python3 _tools/surface-web.py` the web surface points at the board and carries the
+board's display on top, with touch: one page for the screen, the buttons and the LEDs.
+`_tools/board/remote-web.py` is the display alone.
+
+Two things the board taught: Wi-Fi works only with ConnMan and wpa_supplicant started in the
+chroot (Engine talks to `net.connman`, nothing else), and an RK3288 with no heatsink powers
+itself off on temperature within the hour if the GPU is pinned to `performance` as the real
+unit does, so the launcher does not, and `board.sh temp` is worth a look.
+
 `az01-mirror.sh` is the remote view: ffmpeg's `kmsgrab` reads the buffer the display is
 scanning out and serves it as MJPEG over HTTP, 8 fps at 960 px wide on this CPU, to any browser
 on the cable. The board has no DHCP on that link, so the Mac reaches it by IPv6 link-local for

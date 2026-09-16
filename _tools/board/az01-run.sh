@@ -78,6 +78,17 @@ json.dump(d, open(f, "w"), indent=1)
 JSON
 fi
 
+# 3c. the sound card and the control surface, the same module as under QEMU
+#     built against Armbian's kernel (_vm/snd-combined-board.ko, copied here
+#     by board.sh install). Engine identifies the surface in its first half
+#     minute, so it must be there before Engine starts.
+if [ -f /root/snd-combined.ko ] && ! grep -q Surface /proc/asound/cards 2>/dev/null; then
+    for m in snd-pcm snd-rawmidi snd-seq snd-seq-midi; do modprobe $m 2>/dev/null || true; done
+    insmod /root/snd-combined.ko id=NH08 name=NH08 channels=16 rate=48000 \
+        && echo "virtual sound card and control surface loaded" \
+        || echo "WARNING: snd-combined.ko did not load"
+fi
+
 # 3b. the touchscreen. Engine's interface answers touch, not mouse clicks,
 #     so the bridge from _tools/uinput-touch.c turns the USB mouse into one
 #     (relative movement integrated, left button = finger). It must exist

@@ -29,6 +29,7 @@ case "${1:-}" in
              #   arm-linux-gnueabihf-gcc -O2 -w -static -o /work/_vm/uinput-touch-static /work/_tools/uinput-touch.c
              # copied alongside and renamed: the running one is busy (ETXTBSY)
              [ -f "$D/../../_vm/uinput-touch-static" ] && scp -q $O "$D/../../_vm/uinput-touch-static" "root@[$H]:/root/uinput-touch.new"
+             [ -f "$D/../../_vm/snd-combined-board.ko" ] && scp -q $O "$D/../../_vm/snd-combined-board.ko" "root@[$H]:/root/snd-combined.ko"
              ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
     start)   ssh $O "root@$H" 'bash /root/az01-run.sh && bash /root/az01-mirror.sh' ;;
     stop)    ssh $O "root@$H" 'bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;

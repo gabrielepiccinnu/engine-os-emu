@@ -17,8 +17,14 @@ to the surface from /proc/asound/Surface/monitor, the bytes are parsed into
 notes and CCs, and every change is pushed to the page as a server-sent event.
 That is how the LEDs and the VU meters light up: Engine drives them exactly as
 it would the real buttons.
+
+BOARD=1 points all of it at the Tinker Board instead of the QEMU guest: the
+same module is loaded there, so the same bytes go to the same device. In that
+mode the page also carries the board's display with touch, served by the
+remote desktop code in _tools/board/remote-web.py (/stream, /touch).
 """
 import http.server
+import importlib.util
 import json
 import os
 import queue
@@ -33,10 +39,18 @@ VM = os.path.join(BASE, "_vm")
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8808"))
 KEY = "/tmp/id_vm_web"
+BOARD = bool(os.environ.get("BOARD"))
 
-SSH = ["ssh", "-p", "2222", "-i", KEY, "-o", "StrictHostKeyChecking=no",
-       "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
-       "-o", "ServerAliveInterval=15", "-o", "LogLevel=ERROR", "root@127.0.0.1"]
+remote = None
+if BOARD:
+    spec = importlib.util.spec_from_file_location("remote_web", os.path.join(BASE, "_tools", "board", "remote-web.py"))
+    remote = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(remote)
+    SSH = remote.SSH
+else:
+    SSH = ["ssh", "-p", "2222", "-i", KEY, "-o", "StrictHostKeyChecking=no",
+           "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
+           "-o", "ServerAliveInterval=15", "-o", "LogLevel=ERROR", "root@127.0.0.1"]
 
 # The card index is not fixed, the Surface card comes after the audio one:
 # resolve it in the guest from the /proc/asound symlink, then keep writing.
@@ -210,14 +224,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 monitor.unsubscribe(q)
         elif self.path == "/status":
             ok = pipe.alive() or pipe.open()
-            self._reply(200, '{"connected": %s, "sent": %d, "error": %s}'
+            self._reply(200, '{"connected": %s, "sent": %d, "error": %s, "target": "%s"}'
                         % ("true" if ok else "false", pipe.sent,
-                           '"%s"' % pipe.error.replace('"', "'")),
+                           '"%s"' % pipe.error.replace('"', "'"), "board" if BOARD else "qemu"),
                         "application/json")
+        elif remote and (self.path == "/config" or self.path.startswith("/stream")):
+            remote.Handler.do_GET(self)          # the board's display: same handlers, same server
         else:
             self._reply(404, "not found")
 
     def do_POST(self):
+        if remote and self.path == "/touch":
+            return remote.Handler.do_POST(self)
         if self.path != "/midi":
             return self._reply(404, "not found")
         n = int(self.headers.get("Content-Length", "0"))
@@ -235,12 +253,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    src = os.path.join(VM, "id_vm")
-    if not os.path.exists(src):
-        sys.exit("no %s: build or export the VM first" % src)
-    with open(src, "rb") as f, open(KEY, "wb") as g:
-        g.write(f.read())
-    os.chmod(KEY, 0o600)
+    if not BOARD:
+        src = os.path.join(VM, "id_vm")
+        if not os.path.exists(src):
+            sys.exit("no %s: build or export the VM first" % src)
+        with open(src, "rb") as f, open(KEY, "wb") as g:
+            g.write(f.read())
+        os.chmod(KEY, 0o600)
+    else:
+        remote.frames.start()
+        print("target: the Tinker Board, with its display on the page")
 
     if pipe.open():
         print("guest: connected to the Control Surface inject port")
