@@ -3,7 +3,10 @@
 # Board's RK3288, with Armbian's kernel, DRM/KMS and panfrost underneath.
 #
 #     az01-run.sh            start Engine (log in /opt/az01/root/engine.log)
-#     az01-run.sh stop       stop it and give the console back
+#     az01-run.sh stop       stop it and give the console back; the chroot's
+#                            daemons (D-Bus, ConnMan, BlueZ, edisksd) stay,
+#                            and so does the Wi-Fi connection
+#     az01-run.sh stop-all   take those down as well
 #
 # What the real unit has and this board has not, and how it is stood in for:
 #  - the device tree identity (inmusic,product-code etc.): a copy of the live
@@ -28,12 +31,16 @@ kill_chroot_daemons() {
     true
 }
 
-if [ "${1:-}" = "stop" ]; then
+# "stop" leaves the chroot's daemons running, D-Bus, ConnMan, BlueZ,
+# edisksd and the supplicant: the Wi-Fi driver fails its first associations
+# after every fresh start of the supplicant, so a connection is worth
+# keeping across restarts of Engine. "stop all" takes everything down.
+if [ "${1:-}" = "stop" ] || [ "${1:-}" = "stop-all" ]; then
     # the main thread is renamed EMain, so pkill by name misses it: pidof goes by the binary
     kill $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
     sleep 2; kill -9 $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
     pkill -x uinput-touch 2>/dev/null || true
-    kill_chroot_daemons
+    [ "$1" = "stop-all" ] && kill_chroot_daemons
     for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 1 > $v/bind 2>/dev/null;; esac; done
     echo "stopped"; exit 0
 fi
@@ -133,7 +140,6 @@ fi
 
 kill $(pidof Engine OfflineAnalyzer) 2>/dev/null || true; sleep 1
 kill -9 $(pidof Engine OfflineAnalyzer) 2>/dev/null || true
-kill_chroot_daemons
 rm -f $R/tmp/engine_runguard.lock
 
 # 4. what runs inside the chroot, written where the chroot sees it
@@ -141,22 +147,56 @@ cat > $R/root/az01-inner.sh <<'INNER'
 # the system bus, so edisksd (drives) and the rest are reachable and activatable
 mkdir -p /run/dbus
 [ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id
-dbus-daemon --system --fork
+alive() { [ -s "/run/az01-$1.pid" ] && kill -0 "$(cat "/run/az01-$1.pid")" 2>/dev/null; }
+launch() { n=$1; shift; alive $n && return; setsid "$@" < /dev/null > /root/$n.log 2>&1 & echo $! > /run/az01-$n.pid; }
+if ! alive dbus; then
+    rm -f /run/dbus/pid /run/dbus/system_bus_socket
+    dbus-daemon --system --fork --print-pid > /run/az01-dbus.pid
+fi
 # the drives: Engine asks edisksd over the bus for them, and the service file
 # activates it through systemd only (Exec=/bin/false), so it is started here
-(setsid /usr/libexec/edisksd < /dev/null > /root/edisksd.log 2>&1 &)
+launch edisksd /usr/libexec/edisksd
 # Wi-Fi: Engine asks ConnMan (net.connman), ConnMan drives wpa_supplicant,
 # both on this bus and both started by systemd on the real unit. Armbian has
 # let go of wlan0 already, and ConnMan is kept off the Ethernet cable this
 # whole session runs over.
 grep -q NetworkInterfaceBlacklist /etc/connman/main.conf \
     || sed -i '/^\[General\]/a NetworkInterfaceBlacklist=end0,eth0,sit0,ip6tnl0,lo' /etc/connman/main.conf
-(setsid /usr/sbin/wpa_supplicant -u -s < /dev/null > /dev/null 2>&1 &)
-sleep 1
-(setsid /usr/sbin/connmand -n < /dev/null > /root/connman.log 2>&1 &)
+# Networks Engine has joined are kept as favourites that reconnect on their
+# own: Engine leaves them Favorite=false, and then nothing reconnects after a
+# restart, and a Connect asked before a scan has run answers "Input/output
+# error", which Engine shows as a Wi-Fi login error. A scan is requested
+# once ConnMan is up, and it takes it from there.
+for f in /var/lib/connman/wifi_*/settings; do
+    [ -f "$f" ] || continue
+    grep -q "^Favorite=true" "$f" || sed -i 's/^Favorite=.*/Favorite=true/' "$f"
+    grep -q "^AutoConnect=" "$f" || echo "AutoConnect=true" >> "$f"
+done
+alive wpa || { launch wpa /usr/sbin/wpa_supplicant -u -f /root/wpa.log; sleep 1; }
+launch connman /usr/sbin/connmand -n
+cat > /root/az01-wifi.sh <<'WIFI'
+# power the Wi-Fi, scan, then connect to a network Engine has joined
+# before; ConnMan does not do the last step by itself here, and a Connect
+# before a scan has completed answers "Input/output error", so it is tried
+# a few times, each after a fresh scan
+sleep 5
+dbus-send --system --dest=net.connman /net/connman/technology/wifi net.connman.Technology.SetProperty string:Powered variant:boolean:true > /dev/null 2>&1
+for try in 1 2 3 4 5 6; do
+    dbus-send --system --dest=net.connman /net/connman/technology/wifi net.connman.Technology.Scan > /dev/null 2>&1
+    sleep 8
+    for d in /var/lib/connman/wifi_*_managed_psk; do
+        [ -d "$d" ] || continue
+        r=$(dbus-send --system --print-reply --dest=net.connman "/net/connman/service/$(basename "$d")" net.connman.Service.Connect 2>&1 | tail -n 1)
+        echo "try $try $(basename "$d"): $r"
+        case "$r" in *"method return"*|*AlreadyConnected*) exit 0 ;; esac
+    done
+    sleep 4
+done
+WIFI
+ip link show wlan0 2>/dev/null | grep -q "state UP" || (setsid sh /root/az01-wifi.sh < /dev/null > /root/wifi.log 2>&1 &)
 # Bluetooth: Engine talks to BlueZ (org.bluez) on this bus, "NoUsableAdapter"
 # without it; the adapter is the board's own hci0, left alone by Armbian
-[ -x /usr/libexec/bluetooth/bluetoothd ] && (setsid /usr/libexec/bluetooth/bluetoothd -n < /dev/null > /root/bluetoothd.log 2>&1 &)
+[ -x /usr/libexec/bluetooth/bluetoothd ] && launch bluetoothd /usr/libexec/bluetooth/bluetoothd -n
 export LD_LIBRARY_PATH=/usr/qt/lib
 export QT_QPA_PLATFORM=eglfs
 [ -f /root/qtlog.ini ] && export QT_LOGGING_CONF=/root/qtlog.ini
@@ -177,7 +217,7 @@ mount --bind /dev/pts $R/dev/pts
 mount -t proc proc $R/proc
 mount --rbind /sys $R/sys
 mount -t tmpfs tmpfs $R/tmp
-mount -t tmpfs tmpfs $R/run
+mkdir -p $S/run; mount --bind $S/run $R/run
 mkdir -p $R/run/udev; mount -t overlay overlay -o lowerdir=/run/udev,upperdir=$UD/upper,workdir=$UD/work $R/run/udev
 mount --bind $S/dt/base $R/sys/firmware/devicetree/base
 mount --bind $S/interrupts $R/proc/interrupts
