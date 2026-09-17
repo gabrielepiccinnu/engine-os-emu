@@ -17,6 +17,8 @@
 #     bash board.sh cool            tail of the cooling guard's log
 #
 # BOARD_HOST overrides the address; BOARD_IF the Mac's interface (en0).
+# AUDIO_OUT (hw:HDMI, hw:Device, ...) picks the card start plays through, and
+# PERIOD_MIN=1024 gives Engine longer audio periods on a throttled CPU.
 set -e
 IF="${BOARD_IF:-en0}"
 H="${BOARD_HOST:-fe80::8ad7:f6ff:fec2:c5c1%$IF}"
@@ -33,7 +35,7 @@ case "${1:-}" in
              [ -f "$D/../../_vm/uinput-touch-static" ] && scp -q $O "$D/../../_vm/uinput-touch-static" "root@[$H]:/root/uinput-touch.new"
              [ -f "$D/../../_vm/snd-combined-board.ko" ] && scp -q $O "$D/../../_vm/snd-combined-board.ko" "root@[$H]:/root/snd-combined.ko"
              ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/az01-cool.sh /root/az01-audio.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
-    start)   ssh $O "root@$H" 'bash /root/az01-run.sh && bash /root/az01-mirror.sh && bash /root/az01-cool.sh && (sleep 45; bash /root/az01-audio.sh) > /dev/null 2>&1 &' ;;
+    start)   ssh $O "root@$H" "PERIOD_MIN=${PERIOD_MIN:-0} bash /root/az01-run.sh && bash /root/az01-mirror.sh && bash /root/az01-cool.sh && (sleep 45; OUT=${AUDIO_OUT:-hw:HDMI} bash /root/az01-audio.sh) > /dev/null 2>&1 &" ;;
     stop)    ssh $O "root@$H" 'bash /root/az01-cool.sh stop; bash /root/az01-audio.sh stop; bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;
     audio)   shift; ssh $O "root@$H" "OUT=${1:-hw:HDMI} bash /root/az01-audio.sh" ;;
     temp)    ssh $O "root@$H" 'for z in /sys/class/thermal/thermal_zone*; do printf "%s: %s C\n" "$(cat $z/type)" "$(( $(cat $z/temp) / 1000 ))"; done; cat /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/cur_freq 2>/dev/null | sed "s/^/gpu Hz: /"; uptime' ;;

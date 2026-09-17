@@ -10,14 +10,17 @@
 # "NH08 loop", a card of its own, gives them back as a capture. Measured with a
 # track playing, channels 0/1 carry the master mix and 4/5 the same 10 dB
 # down (booth or cue), the rest is silence. ffmpeg keeps 0/1 and writes
-# them to aplay, which writes them to the output card. Two processes rather
-# than ffmpeg alone because ffmpeg's ALSA output takes a two second buffer
-# and offers no way to shrink it; aplay's is set here, 4096 frames, 85 ms.
+# them to aplay, which writes them to the output card. Three processes
+# rather than ffmpeg alone: ffmpeg's ALSA input reads 2048-frame chunks and
+# its ALSA output takes a two second buffer, neither adjustable, so arecord
+# reads the loop in 512-frame periods and aplay writes with the buffer set
+# here, 8192 frames, 170 ms, of which the jitter of a throttled CPU eats a
+# good part; ffmpeg in between only mixes the pair down.
 # Both run real-time, but below Engine's own audio threads (SCHED_RR 45-49,
 # pinned to cores): above them they starved them and Engine's stream died.
 OUT="${OUT:-hw:HDMI}"
 PAIR="${PAIR:-c0=c0|c1=c1}"
-BUFFER="${BUFFER:-4096}"
+BUFFER="${BUFFER:-8192}"
 LOG=/root/audio.log
 
 if [ "${1:-}" = "stop" ]; then pkill -f "az01-audio-loop"; pkill -f "ffmpeg -loglevel warning -f alsa"; pkill -x aplay; echo stopped; exit 0; fi
@@ -26,9 +29,10 @@ pkill -f "az01-audio-loop" 2>/dev/null; pkill -f "ffmpeg -loglevel warning -f al
 cat > /root/az01-audio-loop.sh <<EOF
 echo \$\$ > /sys/fs/cgroup/cgroup.procs
 while true; do
-  chrt -r 30 ffmpeg -loglevel warning -f alsa -acodec pcm_s32le -channels 16 -sample_rate 48000 -i hw:Loop \\
-    -af "pan=stereo|$PAIR" -f s16le -ar 48000 - \\
-  | chrt -r 30 aplay -q -D $OUT -f S16_LE -c 2 -r 48000 --buffer-size=$BUFFER --period-size=$((BUFFER/4))
+  chrt -r 30 arecord -q -D hw:Loop -f S32_LE -c 16 -r 48000 --period-size=512 --buffer-size=4096 -t raw \\
+  | chrt -r 30 ffmpeg -loglevel warning -probesize 32 -analyzeduration 0 -blocksize 32768 \\
+      -f s32le -ar 48000 -ac 16 -i - -af "pan=stereo|$PAIR" -f s16le -ar 48000 - \\
+  | chrt -r 30 aplay -D $OUT -f S16_LE -c 2 -r 48000 --buffer-size=$BUFFER --period-size=$((BUFFER/8))
   sleep 2
 done
 EOF

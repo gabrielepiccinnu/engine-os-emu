@@ -104,6 +104,7 @@ static int rate = 48000;
 static char *surface = "Control Surface";
 static bool debug;
 static char *identity = "00 01 01 00 00 31";
+static int period_min;
 module_param(id, charp, 0444);
 module_param(name, charp, 0444);
 module_param(channels, int, 0444);
@@ -113,6 +114,8 @@ MODULE_PARM_DESC(surface, "name of the control surface MIDI card, empty for none
 module_param(debug, bool, 0644);
 MODULE_PARM_DESC(debug, "log every byte crossing between the two MIDI devices");
 module_param(identity, charp, 0444);
+module_param(period_min, int, 0444);
+MODULE_PARM_DESC(period_min, "smallest period in frames; Engine asks for 512, a throttled CPU may need 1024");
 MODULE_PARM_DESC(identity, "the six free bytes of the identity reply; the last four are the firmware version");
 
 static struct platform_device *combined_pdev;
@@ -149,6 +152,7 @@ struct combined_stream {
 	unsigned int buffer_bytes;
 	unsigned int pos;
 	unsigned int loop_acc;		/* loop capture: bytes since its last period */
+	unsigned int owed;		/* playback: ticks the clock stood still for */
 	bool running;
 	bool is_loop;			/* device 1 capture: no timer of its own */
 };
@@ -210,6 +214,7 @@ static enum hrtimer_restart combined_timer(struct hrtimer *t)
 		snd_pcm_sframes_t filled = rt->control->appl_ptr - rt->status->hw_ptr;
 
 		if (filled < (snd_pcm_sframes_t)rt->period_size) {
+			s->owed++;
 			spin_unlock_irqrestore(&s->pcm->lock, flags);
 			hrtimer_forward_now(t, s->period_ns);
 			/* still the period interrupt: a writer sleeping in poll for
@@ -217,6 +222,20 @@ static enum hrtimer_restart combined_timer(struct hrtimer *t)
 			 * wait for the clock and the clock for the writer, for good */
 			snd_pcm_period_elapsed(s->substream);
 			return HRTIMER_RESTART;
+		}
+		/* A tick the clock stood still for is owed to whatever is
+		 * downstream of the loop, which kept consuming at 48 kHz: once
+		 * Engine is a period ahead again, take two at once, and the
+		 * average rate is exact. Without this every stall is 10 ms the
+		 * output buffer never gets back, and it runs dry every few
+		 * seconds on a throttled CPU. */
+		if (s->owed && filled >= 2 * (snd_pcm_sframes_t)rt->period_size) {
+			s->owed--;
+			from = s->pos;
+			s->pos += s->period_bytes;
+			if (s->pos >= s->buffer_bytes)
+				s->pos -= s->buffer_bytes;
+			combined_feed_loop(s, from);
 		}
 	}
 	from = s->pos;
@@ -295,6 +314,9 @@ static int combined_open(struct snd_pcm_substream *substream)
 	substream->runtime->hw.rate_min = rate;
 	substream->runtime->hw.rate_max = rate;
 	substream->runtime->hw.rates = snd_pcm_rate_to_rate_bit(rate);
+	if (period_min > 0 && !s->is_loop)
+		substream->runtime->hw.period_bytes_min =
+			period_min * (channels > 0 ? channels : 2) * 4;
 	substream->runtime->private_data = s;
 	return 0;
 }
@@ -327,6 +349,7 @@ static int combined_prepare(struct snd_pcm_substream *substream)
 	s->period_bytes = snd_pcm_lib_period_bytes(substream);
 	s->pos = 0;
 	s->loop_acc = 0;
+	s->owed = 0;
 	/* div_u64, not "/": a 64 bit division on ARM32 pulls in __aeabi_uldivmod,
 	 * which the kernel does not export to modules. In nanoseconds, rounded:
 	 * a period of 512 frames at 48 kHz is 10666.67 us, and truncating it to

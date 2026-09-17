@@ -108,7 +108,9 @@ echo "$MODE" > $S/mode
 #     minute, so it must be there before Engine starts.
 if [ -f /root/snd-combined.ko ] && ! grep -q Surface /proc/asound/cards 2>/dev/null; then
     for m in snd-pcm snd-rawmidi snd-seq snd-seq-midi; do modprobe $m 2>/dev/null || true; done
-    insmod /root/snd-combined.ko id=NH08 name=NH08 channels=16 rate=48000 \
+    # PERIOD_MIN=1024 gives Engine 21 ms periods instead of the 10.7 it asks
+    # for: on this board's throttled CPU it misses 10.7 ms periods now and then
+    insmod /root/snd-combined.ko id=NH08 name=NH08 channels=16 rate=48000 period_min="${PERIOD_MIN:-0}" \
         && echo "virtual sound card and control surface loaded" \
         || echo "WARNING: snd-combined.ko did not load"
 fi
