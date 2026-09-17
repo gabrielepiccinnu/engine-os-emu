@@ -22,7 +22,7 @@ PRODUCT="${PRODUCT:-NH08}"
 # wpa_supplicant of its own, and killing those by name takes the host down
 # with them (its system bus, and everything that talks to it).
 kill_chroot_daemons() {
-    for p in $(pidof connmand wpa_supplicant dbus-daemon edisksd); do
+    for p in $(pidof connmand wpa_supplicant dbus-daemon edisksd bluetoothd); do
         [ "$(readlink /proc/$p/root 2>/dev/null)" = "$R" ] && kill $p 2>/dev/null
     done
     true
@@ -48,9 +48,12 @@ printf 'TINKER0000000001\0'    > "$S/dt/base/serial-number"
 # 2. the interrupt Engine pins to a CPU
 sed 's/ff690000.serial/ttyS0/' /proc/interrupts > $S/interrupts
 grep -q ttyS0 $S/interrupts || sed '0,/eth0/s/eth0/ttyS0/' /proc/interrupts > $S/interrupts
-# 2b. wlan0 belongs to the chroot's ConnMan, not to Armbian's supplicants
+# 2b. wlan0 belongs to the chroot's ConnMan, not to Armbian's supplicants,
+#     and hci0 to the chroot's BlueZ
 systemctl stop wpa_supplicant 2>/dev/null || true
 pkill -f "wpa_supplicant -c /run/netplan" 2>/dev/null || true
+systemctl stop bluetooth 2>/dev/null || true
+rfkill unblock bluetooth 2>/dev/null || true
 
 # 2c. what edisksd may see. It reads the udev database, and Engine puts up
 #     "Incompatible Format" for every ext4 device in it: the SD card Armbian
@@ -151,6 +154,9 @@ grep -q NetworkInterfaceBlacklist /etc/connman/main.conf \
 (setsid /usr/sbin/wpa_supplicant -u -s < /dev/null > /dev/null 2>&1 &)
 sleep 1
 (setsid /usr/sbin/connmand -n < /dev/null > /root/connman.log 2>&1 &)
+# Bluetooth: Engine talks to BlueZ (org.bluez) on this bus, "NoUsableAdapter"
+# without it; the adapter is the board's own hci0, left alone by Armbian
+[ -x /usr/libexec/bluetooth/bluetoothd ] && (setsid /usr/libexec/bluetooth/bluetoothd -n < /dev/null > /root/bluetoothd.log 2>&1 &)
 export LD_LIBRARY_PATH=/usr/qt/lib
 export QT_QPA_PLATFORM=eglfs
 [ -f /root/qtlog.ini ] && export QT_LOGGING_CONF=/root/qtlog.ini

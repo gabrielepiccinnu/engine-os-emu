@@ -214,7 +214,11 @@ static enum hrtimer_restart combined_timer(struct hrtimer *t)
 		snd_pcm_sframes_t filled = rt->control->appl_ptr - rt->status->hw_ptr;
 
 		if (filled < (snd_pcm_sframes_t)rt->period_size) {
-			s->owed++;
+			/* a few ticks are worth taking back; a long silence, the
+			 * stream started before Engine fills it, is not, or the
+			 * clock would then run double for as long, audibly */
+			if (s->owed < 4)
+				s->owed++;
 			spin_unlock_irqrestore(&s->pcm->lock, flags);
 			hrtimer_forward_now(t, s->period_ns);
 			/* still the period interrupt: a writer sleeping in poll for
