@@ -13,6 +13,7 @@
 #     bash board.sh stop
 #     bash board.sh shot FILE.png   grab the HDMI output
 #     bash board.sh temp            CPU and GPU temperature, and the GPU clock
+#     bash board.sh audio [hw:X]    Engine's master out of the HDMI (default) or another card
 #     bash board.sh cool            tail of the cooling guard's log
 #
 # BOARD_HOST overrides the address; BOARD_IF the Mac's interface (en0).
@@ -25,15 +26,16 @@ case "${1:-}" in
     "")      exec ssh $O "root@$H" ;;
     cp)      exec scp -q $O "$2" "root@[$H]:$3" ;;
     get)     exec scp -q $O "root@[$H]:$2" "$3" ;;
-    install) scp -q $O "$D/az01-run.sh" "$D/az01-mirror.sh" "$D/az01-cool.sh" "root@[$H]:/root/"
+    install) scp -q $O "$D/az01-run.sh" "$D/az01-mirror.sh" "$D/az01-cool.sh" "$D/az01-audio.sh" "root@[$H]:/root/"
              # the touch bridge, built static in the container: docker exec engine-os-emu \
              #   arm-linux-gnueabihf-gcc -O2 -w -static -o /work/_vm/uinput-touch-static /work/_tools/uinput-touch.c
              # copied alongside and renamed: the running one is busy (ETXTBSY)
              [ -f "$D/../../_vm/uinput-touch-static" ] && scp -q $O "$D/../../_vm/uinput-touch-static" "root@[$H]:/root/uinput-touch.new"
              [ -f "$D/../../_vm/snd-combined-board.ko" ] && scp -q $O "$D/../../_vm/snd-combined-board.ko" "root@[$H]:/root/snd-combined.ko"
-             ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/az01-cool.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
-    start)   ssh $O "root@$H" 'bash /root/az01-run.sh && bash /root/az01-mirror.sh && bash /root/az01-cool.sh' ;;
-    stop)    ssh $O "root@$H" 'bash /root/az01-cool.sh stop; bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;
+             ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/az01-cool.sh /root/az01-audio.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
+    start)   ssh $O "root@$H" 'bash /root/az01-run.sh && bash /root/az01-mirror.sh && bash /root/az01-cool.sh && (sleep 45; bash /root/az01-audio.sh) > /dev/null 2>&1 &' ;;
+    stop)    ssh $O "root@$H" 'bash /root/az01-cool.sh stop; bash /root/az01-audio.sh stop; bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;
+    audio)   shift; ssh $O "root@$H" "OUT=${1:-hw:HDMI} bash /root/az01-audio.sh" ;;
     temp)    ssh $O "root@$H" 'for z in /sys/class/thermal/thermal_zone*; do printf "%s: %s C\n" "$(cat $z/type)" "$(( $(cat $z/temp) / 1000 ))"; done; cat /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/cur_freq 2>/dev/null | sed "s/^/gpu Hz: /"; uptime' ;;
     cool)    ssh $O "root@$H" 'tail -n 20 /root/cool.log 2>/dev/null; pgrep -f "az01-cool.sh run" > /dev/null && echo "guard: running" || echo "guard: not running"' ;;
     shot)    ssh $O "root@$H" 'ffmpeg -loglevel error -y -f kmsgrab -device /dev/dri/card0 -format bgra -i - -frames:v 1 -update 1 -vf hwdownload,format=bgra -pix_fmt rgb24 /tmp/shot.png'

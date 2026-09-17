@@ -379,6 +379,17 @@ or Engine puts up "Incompatible Format"; the udev database it reads is Armbian's
 gets an overlay of it in which the ext4 and swap entries carry no filesystem, and a stick plugged
 in later shows through from below.
 
+And it has sound. The virtual card's playback comes out again on a third card, `NH08 loop`,
+a capture returning the sixteen S32 channels Engine writes, clocked by the same hrtimer (the
+period in nanoseconds: truncated to microseconds it ran 0.006% fast, an underrun every five
+minutes). `_tools/board/az01-audio.sh` reads it, keeps channels 0/1, which carry the master
+mix (4/5 are the same 10 dB down, the rest silence), and plays them through `aplay` on the HDMI
+or a USB card with an 85 ms buffer. Three things had to be found out the hard way: Engine opens
+every PCM of a card as `hw:<card>`, so the loop must be a card of its own or Engine reopens its
+own device and gives up; a late writer must still get its period interrupt, or Engine, which
+paces itself on it, waits for the clock and the clock for Engine; and whatever carries the
+audio out must run below Engine's own SCHED_RR 45-49 audio threads, or it starves them.
+
 Two things the board taught: Wi-Fi works only with ConnMan and wpa_supplicant started in the
 chroot (Engine talks to `net.connman`, nothing else), and an RK3288 with no heatsink powers
 itself off on temperature within the hour if the GPU is pinned to `performance` as the real

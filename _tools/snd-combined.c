@@ -47,6 +47,20 @@
 // on the spot, and Engine loads "NH08 Controller" as if the buttons were there.
 //
 //     insmod snd-combined.ko id=NH08 name="NH08" channels=16 rate=48000
+//
+// THE PLAYBACK COMES OUT AGAIN AS A CAPTURE
+// A third card, "<name> loop", is a capture stream that returns exactly
+// what Engine writes to the audio card's playback, driven by the same timer
+// so the two never drift apart. Its own card, not a second PCM device of the
+// audio card: Engine opens every PCM of a card as "hw:<card>", the device
+// index left out, so a second device makes it reopen the first, which it
+// already holds, and it gives the card up as "Device initialization error". That is the way to real audio on
+// hardware that has some: a process reads the 16 channels there, keeps the
+// pair it wants and writes it to the HDMI or USB card, for instance
+//   ffmpeg -f alsa -acodec pcm_s32le -channels 16 -sample_rate 48000 -i hw:Loop
+//          -af "pan=stereo|c0=c0|c1=c1" -f alsa hw:HDMI
+// The timers are hrtimers: a period of 512 frames at 48 kHz is 10.67 ms,
+// and jiffies would make that 8 or 12.
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -56,16 +70,12 @@
 #include <linux/version.h>
 
 /* Built for two kernels: Debian's 6.1 under QEMU and Armbian's 6.18 on the
- * Tinker Board. Between them the timer helpers were renamed and the
- * platform driver's remove callback stopped returning anything. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
-#define timer_container(ptr, type, member) timer_container_of(ptr, type, member)
-#define timer_stop_sync(t) timer_delete_sync(t)
-#define timer_stop(t) timer_delete(t)
+ * Tinker Board. Between them hrtimer_setup appeared and the platform
+ * driver's remove callback stopped returning anything. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+#define combined_hrtimer_setup(t, fn) hrtimer_setup(t, fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL)
 #else
-#define timer_container(ptr, type, member) from_timer(ptr, type, member)
-#define timer_stop_sync(t) del_timer_sync(t)
-#define timer_stop(t) del_timer(t)
+#define combined_hrtimer_setup(t, fn) do { hrtimer_init(t, CLOCK_MONOTONIC, HRTIMER_MODE_REL); (t)->function = fn; } while (0)
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 #define REMOVE_RETURN void
@@ -74,6 +84,7 @@
 #define REMOVE_RETURN int
 #define REMOVE_DONE return 0
 #endif
+#include <linux/hrtimer.h>
 #include <linux/kfifo.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
@@ -108,36 +119,136 @@ static struct platform_device *combined_pdev;
 
 struct combined_cards {
 	struct snd_card *audio;
+	struct snd_card *loop;
 	struct snd_card *surface;
+};
+
+/* One card's PCM state: the playback of device 0 and the loop capture of
+ * device 1 meet here, under one lock, because the playback timer feeds the
+ * capture buffer directly. */
+#define LOOP_SUBSTREAMS 4
+
+struct combined_pcm {
+	spinlock_t lock;
+	struct snd_pcm *loop_pcm;		/* the loop card's PCM */
+	struct combined_stream *playback;	/* the audio card's playback, when open */
+	/* device 1's capture substreams, when open. Several of them, because
+	 * Engine enumerates every PCM of its card at start-up and on every
+	 * hotplug, opening each one to read its parameters: with the loop held
+	 * by the process that carries the audio out, a single substream would
+	 * answer "busy" and Engine would give up on the whole card. */
+	struct combined_stream *loop[LOOP_SUBSTREAMS];
 };
 
 struct combined_stream {
 	struct snd_pcm_substream *substream;
-	struct timer_list timer;
+	struct combined_pcm *pcm;
+	struct hrtimer timer;
+	ktime_t period_ns;
 	unsigned int period_bytes;
 	unsigned int buffer_bytes;
 	unsigned int pos;
-	unsigned int period_jiffies;
+	unsigned int loop_acc;		/* loop capture: bytes since its last period */
 	bool running;
+	bool is_loop;			/* device 1 capture: no timer of its own */
 };
 
-static void combined_timer(struct timer_list *t)
+/* A period of the playback just went by: hand it to the loop capture. Both
+ * buffers are rings of possibly different sizes, so the copy wraps on each
+ * side on its own. Called with the pcm lock held. */
+static void combined_feed_one(struct combined_stream *pb, struct combined_stream *cap,
+			      unsigned int from)
 {
-	struct combined_stream *s = timer_container(s, t, timer);
+	unsigned char *src = pb->substream->runtime->dma_area;
+	unsigned char *dst = cap->substream->runtime->dma_area;
+	unsigned int n = pb->period_bytes;
 
-	if (!s->running)
-		return;
+	while (n) {
+		unsigned int a = min(n, pb->buffer_bytes - from);
+		unsigned int b = min(a, cap->buffer_bytes - cap->pos);
+
+		memcpy(dst + cap->pos, src + from, b);
+		from = (from + b) % pb->buffer_bytes;
+		cap->pos = (cap->pos + b) % cap->buffer_bytes;
+		cap->loop_acc += b;
+		n -= b;
+	}
+}
+
+static void combined_feed_loop(struct combined_stream *pb, unsigned int from)
+{
+	int i;
+
+	for (i = 0; i < LOOP_SUBSTREAMS; i++) {
+		struct combined_stream *cap = pb->pcm->loop[i];
+
+		if (cap && cap->running)
+			combined_feed_one(pb, cap, from);
+	}
+}
+
+static enum hrtimer_restart combined_timer(struct hrtimer *t)
+{
+	struct combined_stream *s = container_of(t, struct combined_stream, timer);
+	struct snd_pcm_substream *elapsed[LOOP_SUBSTREAMS];
+	int n_elapsed = 0, i;
+	unsigned long flags;
+	unsigned int from;
+
+	spin_lock_irqsave(&s->pcm->lock, flags);
+	if (!s->running) {
+		spin_unlock_irqrestore(&s->pcm->lock, flags);
+		return HRTIMER_NORESTART;
+	}
+	/* A real card's DMA does not wait, and a late writer gets an underrun.
+	 * Nothing here has to be that strict: when Engine has not yet written
+	 * the period about to be consumed (a throttled CPU, a busy start-up)
+	 * the clock stands still for one tick instead, and the stream survives
+	 * with a hiccup. Engine does not recover from an XRUN by itself. */
+	if (s->substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		struct snd_pcm_runtime *rt = s->substream->runtime;
+		snd_pcm_sframes_t filled = rt->control->appl_ptr - rt->status->hw_ptr;
+
+		if (filled < (snd_pcm_sframes_t)rt->period_size) {
+			spin_unlock_irqrestore(&s->pcm->lock, flags);
+			hrtimer_forward_now(t, s->period_ns);
+			/* still the period interrupt: a writer sleeping in poll for
+			 * it, which is how Engine paces itself, would otherwise
+			 * wait for the clock and the clock for the writer, for good */
+			snd_pcm_period_elapsed(s->substream);
+			return HRTIMER_RESTART;
+		}
+	}
+	from = s->pos;
 	s->pos += s->period_bytes;
 	if (s->pos >= s->buffer_bytes)
 		s->pos -= s->buffer_bytes;
-	mod_timer(&s->timer, jiffies + s->period_jiffies);
+	if (s->substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		combined_feed_loop(s, from);
+		for (i = 0; i < LOOP_SUBSTREAMS; i++) {
+			struct combined_stream *cap = s->pcm->loop[i];
+
+			if (cap && cap->running && cap->loop_acc >= cap->period_bytes) {
+				cap->loop_acc -= cap->period_bytes;
+				elapsed[n_elapsed++] = cap->substream;
+			}
+		}
+	}
+	spin_unlock_irqrestore(&s->pcm->lock, flags);
+
+	hrtimer_forward_now(t, s->period_ns);
 	snd_pcm_period_elapsed(s->substream);
+	for (i = 0; i < n_elapsed; i++)
+		snd_pcm_period_elapsed(elapsed[i]);
+	return HRTIMER_RESTART;
 }
 
 static struct snd_pcm_hardware combined_hw = {
 	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER |
 		SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID,
-	.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
+	/* one format only: the loop capture returns the playback's bytes as
+	 * they are, so both sides must agree, and Engine takes S32 anyway */
+	.formats = SNDRV_PCM_FMTBIT_S32_LE,
 	.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
 		 SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000,
 	.rate_min = 44100,
@@ -153,14 +264,24 @@ static struct snd_pcm_hardware combined_hw = {
 
 static int combined_open(struct snd_pcm_substream *substream)
 {
+	struct combined_pcm *pcm = substream->pcm->private_data;
 	struct combined_stream *s;
+	unsigned long flags;
 
 	s = kzalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
 		return -ENOMEM;
 	s->substream = substream;
-	timer_setup(&s->timer, combined_timer, 0);
+	s->pcm = pcm;
+	s->is_loop = substream->pcm == pcm->loop_pcm;
+	combined_hrtimer_setup(&s->timer, combined_timer);
 	substream->runtime->hw = combined_hw;
+	spin_lock_irqsave(&pcm->lock, flags);
+	if (s->is_loop)
+		pcm->loop[substream->number] = s;
+	else if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		pcm->playback = s;
+	spin_unlock_irqrestore(&pcm->lock, flags);
 	/* Engine validates the channel count and the rate of the card it opens,
 	 * and rejects it outright when either is not what the product expects,
 	 * so both are parameters: they are what an experiment varies. */
@@ -181,9 +302,16 @@ static int combined_open(struct snd_pcm_substream *substream)
 static int combined_close(struct snd_pcm_substream *substream)
 {
 	struct combined_stream *s = substream->runtime->private_data;
+	unsigned long flags;
 
 	if (s) {
-		timer_stop_sync(&s->timer);
+		hrtimer_cancel(&s->timer);
+		spin_lock_irqsave(&s->pcm->lock, flags);
+		if (s->is_loop)
+			s->pcm->loop[substream->number] = NULL;
+		if (s->pcm->playback == s)
+			s->pcm->playback = NULL;
+		spin_unlock_irqrestore(&s->pcm->lock, flags);
 		kfree(s);
 	}
 	return 0;
@@ -193,18 +321,20 @@ static int combined_prepare(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct combined_stream *s = runtime->private_data;
-	unsigned int period_us;
+	u64 period_ns;
 
 	s->buffer_bytes = snd_pcm_lib_buffer_bytes(substream);
 	s->period_bytes = snd_pcm_lib_period_bytes(substream);
 	s->pos = 0;
+	s->loop_acc = 0;
 	/* div_u64, not "/": a 64 bit division on ARM32 pulls in __aeabi_uldivmod,
-	 * which the kernel does not export to modules. */
-	period_us = (unsigned int)div_u64((u64)runtime->period_size * 1000000,
-					  runtime->rate);
-	s->period_jiffies = usecs_to_jiffies(period_us);
-	if (!s->period_jiffies)
-		s->period_jiffies = 1;
+	 * which the kernel does not export to modules. In nanoseconds, rounded:
+	 * a period of 512 frames at 48 kHz is 10666.67 us, and truncating it to
+	 * microseconds ran the clock 0.006% fast, which is an underrun for
+	 * Engine every five minutes, once its two-period buffer is used up. */
+	period_ns = div_u64((u64)runtime->period_size * NSEC_PER_SEC + runtime->rate / 2,
+			    runtime->rate);
+	s->period_ns = ns_to_ktime(period_ns);
 	return 0;
 }
 
@@ -215,11 +345,12 @@ static int combined_trigger(struct snd_pcm_substream *substream, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 		s->running = true;
-		mod_timer(&s->timer, jiffies + s->period_jiffies);
+		/* the loop capture is clocked by the playback's timer */
+		if (!s->is_loop)
+			hrtimer_start(&s->timer, s->period_ns, HRTIMER_MODE_REL);
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
 		s->running = false;
-		timer_stop(&s->timer);
 		return 0;
 	}
 	return -EINVAL;
@@ -467,6 +598,10 @@ static int combined_monitor_new(struct snd_card *card, struct combined_midi *m)
 	entry->private_data = m;
 	entry->c.ops = &combined_monitor_ops;
 	entry->mode = S_IFREG | 0444;
+	/* an open monitor pins the module: its reader sleeps in the read above,
+	 * and without this rmmod succeeds under it and the wake-up runs freed
+	 * code (a corrupted module list and an Oops in lsmod, on the board) */
+	entry->module = THIS_MODULE;
 	/* snd_info clips every read to entry->size before calling ops->read,
 	 * and a stream has no size: make it one no reader will reach */
 	entry->size = 1UL << 30;
@@ -506,10 +641,12 @@ static int combined_midi_new(struct snd_card *card, struct combined_midi *m,
 	return 0;
 }
 
-static int combined_audio_card(struct platform_device *pdev, struct snd_card **out)
+static int combined_audio_card(struct platform_device *pdev, struct snd_card **out,
+			       struct combined_pcm **cpcm_out)
 {
 	struct snd_card *card;
 	struct snd_pcm *pcm;
+	struct combined_pcm *cpcm;
 	struct combined_midi *midi;
 	int err;
 
@@ -525,22 +662,70 @@ static int combined_audio_card(struct platform_device *pdev, struct snd_card **o
 	strscpy(card->shortname, name, sizeof(card->shortname));
 	strscpy(card->longname, name, sizeof(card->longname));
 
+	cpcm = devm_kzalloc(&pdev->dev, sizeof(*cpcm), GFP_KERNEL);
+	if (!cpcm) {
+		err = -ENOMEM;
+		goto fail;
+	}
+	spin_lock_init(&cpcm->lock);
+
 	err = snd_pcm_new(card, name, 0, 1, 1, &pcm);
 	if (err < 0)
 		goto fail;
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &combined_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &combined_ops);
-	pcm->private_data = card;
+	pcm->private_data = cpcm;
 	pcm->info_flags = 0;
 	strscpy(pcm->name, name, sizeof(pcm->name));
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL,
 				       0, 4 * 1024 * 1024);
+
 
 	/* the MIDI client the device manager follows back to this card; it
 	 * has no partner, so what is written to it goes nowhere */
 	err = combined_midi_new(card, midi, 0, name, true);
 	if (err < 0)
 		goto fail;
+
+	err = snd_card_register(card);
+	if (err < 0)
+		goto fail;
+	*out = card;
+	*cpcm_out = cpcm;
+	return 0;
+
+fail:
+	snd_card_free(card);
+	return err;
+}
+
+/* The playback, out again as a capture: its own card, see the header. */
+static int combined_loop_card(struct platform_device *pdev, struct combined_pcm *cpcm,
+			      struct snd_card **out)
+{
+	struct snd_card *card;
+	struct snd_pcm *pcm;
+	char label[64];
+	int err;
+
+	err = snd_card_new(&pdev->dev, SNDRV_DEFAULT_IDX1, "Loop", THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
+	snprintf(label, sizeof(label), "%s loop", name);
+	strscpy(card->driver, "Combined", sizeof(card->driver));
+	strscpy(card->shortname, label, sizeof(card->shortname));
+	strscpy(card->longname, label, sizeof(card->longname));
+
+	err = snd_pcm_new(card, label, 0, 0, LOOP_SUBSTREAMS, &pcm);
+	if (err < 0)
+		goto fail;
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &combined_ops);
+	pcm->private_data = cpcm;
+	pcm->info_flags = 0;
+	strscpy(pcm->name, label, sizeof(pcm->name));
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL,
+				       0, 4 * 1024 * 1024);
+	cpcm->loop_pcm = pcm;
 
 	err = snd_card_register(card);
 	if (err < 0)
@@ -600,18 +785,25 @@ fail:
 static int combined_probe(struct platform_device *pdev)
 {
 	struct combined_cards *cards;
+	struct combined_pcm *cpcm;
 	int err;
 
 	cards = devm_kzalloc(&pdev->dev, sizeof(*cards), GFP_KERNEL);
 	if (!cards)
 		return -ENOMEM;
 
-	err = combined_audio_card(pdev, &cards->audio);
+	err = combined_audio_card(pdev, &cards->audio, &cpcm);
 	if (err < 0)
 		return err;
+	err = combined_loop_card(pdev, cpcm, &cards->loop);
+	if (err < 0) {
+		snd_card_free(cards->audio);
+		return err;
+	}
 	if (surface && *surface) {
 		err = combined_surface_card(pdev, &cards->surface);
 		if (err < 0) {
+			snd_card_free(cards->loop);
 			snd_card_free(cards->audio);
 			return err;
 		}
@@ -626,6 +818,7 @@ static REMOVE_RETURN combined_remove(struct platform_device *pdev)
 
 	if (cards->surface)
 		snd_card_free(cards->surface);
+	snd_card_free(cards->loop);
 	snd_card_free(cards->audio);
 	REMOVE_DONE;
 }
