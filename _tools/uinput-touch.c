@@ -207,8 +207,15 @@ int main(int argc, char **argv)
     if (tfd < 0) logp("WARNING: no tablet and no mouse, fifo taps only\n");
     else if (grab && ioctl(tfd, EVIOCGRAB, 1) == 0) logp("tablet under EVIOCGRAB\n");
 
-    unlink("/tmp/tapfifo");
-    if (mkfifo("/tmp/tapfifo", 0666) == 0)
+    /* keep a fifo that is already there: a remote desktop holds it open as
+     * its writer across restarts of this bridge, and a new inode would
+     * leave it writing into the old one, unheard */
+    {
+        struct stat st;
+        if (stat("/tmp/tapfifo", &st) == 0 && !S_ISFIFO(st.st_mode))
+            unlink("/tmp/tapfifo");
+    }
+    if (mkfifo("/tmp/tapfifo", 0666) == 0 || errno == EEXIST)
         ffd = open("/tmp/tapfifo", O_RDONLY | O_NONBLOCK);
 
     for (;;) {
