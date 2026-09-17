@@ -97,6 +97,17 @@ modprobe snd_seq_midi 2>/dev/null || true
 #     it. Engine lays its interface out to whatever the mode is. Qt matches
 #     the entry by connector name, HDMI1 here; MODE= picks another.
 MODE="${MODE:-1280x800}"
+#     No display at all is fine too: Engine wants a screen, not a monitor.
+#     With nothing on the HDMI the connector is forced on, the kernel offers
+#     its EDID-less modes, and the picture lives in the DRM buffer the mirror
+#     reads. video=HDMI-A-1:1280x800@60e on the kernel command line
+#     (armbianEnv.txt, extraargs) adds the device's own mode to that list.
+CONN=/sys/class/drm/card0-HDMI-A-1
+if [ "$(cat $CONN/status)" != connected ]; then
+    echo on > $CONN/status; sleep 2
+    echo "no display: HDMI connector forced on ($(head -n1 $CONN/modes))"
+fi
+grep -qx "$MODE" $CONN/modes || { echo "mode $MODE not offered, using $(head -n1 $CONN/modes)"; MODE=$(head -n1 $CONN/modes); }
 SC=$R/usr/Engine/ScreenConfiguration/Default/ScreenConfiguration.json
 if [ -f "$SC" ]; then
     cp -n "$SC" "$SC.orig"
