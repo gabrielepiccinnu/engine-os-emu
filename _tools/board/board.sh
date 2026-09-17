@@ -11,6 +11,7 @@
 #     bash board.sh install         copy az01-run.sh and az01-mirror.sh to /root
 #     bash board.sh start           Engine on the HDMI, and the mirror
 #     bash board.sh stop
+#     bash board.sh reboot          stop everything, then reboot the board
 #     bash board.sh shot FILE.png   grab the HDMI output
 #     bash board.sh temp            CPU and GPU temperature, and the GPU clock
 #     bash board.sh audio [hw:X]    Engine's master out of the HDMI (default) or another card
@@ -37,6 +38,10 @@ case "${1:-}" in
              ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/az01-cool.sh /root/az01-audio.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
     start)   ssh $O "root@$H" "PERIOD_MIN=${PERIOD_MIN:-0} bash /root/az01-run.sh && bash /root/az01-mirror.sh && bash /root/az01-cool.sh && (sleep 45; OUT=${AUDIO_OUT:-hw:HDMI} bash /root/az01-audio.sh) > /dev/null 2>&1 &" ;;
     stop)    ssh $O "root@$H" 'bash /root/az01-cool.sh stop; bash /root/az01-audio.sh stop; bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;
+    # everything down, the chroot's daemons included, then a reboot: with
+    # those still up in their own mount namespace a plain reboot can hang
+    # while systemd waits on them and their mounts
+    reboot)  ssh $O "root@$H" 'bash /root/az01-cool.sh stop; bash /root/az01-audio.sh stop; bash /root/az01-run.sh stop-all; bash /root/az01-mirror.sh stop; sleep 2; sync; systemctl reboot' ;;
     audio)   shift; ssh $O "root@$H" "OUT=${1:-hw:HDMI} bash /root/az01-audio.sh" ;;
     temp)    ssh $O "root@$H" 'for z in /sys/class/thermal/thermal_zone*; do printf "%s: %s C\n" "$(cat $z/type)" "$(( $(cat $z/temp) / 1000 ))"; done; cat /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/cur_freq 2>/dev/null | sed "s/^/gpu Hz: /"; uptime' ;;
     cool)    ssh $O "root@$H" 'tail -n 20 /root/cool.log 2>/dev/null; pgrep -f "az01-cool.sh run" > /dev/null && echo "guard: running" || echo "guard: not running"' ;;
