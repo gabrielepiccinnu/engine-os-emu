@@ -61,6 +61,12 @@ systemctl stop wpa_supplicant 2>/dev/null || true
 pkill -f "wpa_supplicant -c /run/netplan" 2>/dev/null || true
 systemctl stop bluetooth 2>/dev/null || true
 rfkill unblock bluetooth 2>/dev/null || true
+# a fresh start of BlueZ gets a fresh controller: the RTL8723BS stops
+# answering after a while, and a rebind of its serdev reloads its firmware
+if ! pgrep -x bluetoothd > /dev/null && [ -e /sys/bus/serial/drivers/hci_uart_h5/serial0-0 ]; then
+    echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/unbind; sleep 2
+    echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/bind; sleep 4
+fi
 
 # 2c. what edisksd may see. It reads the udev database, and Engine puts up
 #     "Incompatible Format" for every ext4 device in it: the SD card Armbian
@@ -208,6 +214,7 @@ ip link show wlan0 2>/dev/null | grep -q "state UP" || (setsid sh /root/az01-wif
 # Bluetooth: Engine talks to BlueZ (org.bluez) on this bus, "NoUsableAdapter"
 # without it; the adapter is the board's own hci0, left alone by Armbian
 [ -x /usr/libexec/bluetooth/bluetoothd ] && launch bluetoothd /usr/libexec/bluetooth/bluetoothd -n
+(sleep 5; busctl --system set-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered b true > /dev/null 2>&1) &
 export LD_LIBRARY_PATH=/usr/qt/lib
 export QT_QPA_PLATFORM=eglfs
 [ -f /root/qtlog.ini ] && export QT_LOGGING_CONF=/root/qtlog.ini
