@@ -390,6 +390,11 @@ own device and gives up; a late writer must still get its period interrupt, or E
 paces itself on it, waits for the clock and the clock for Engine; and whatever carries the
 audio out must run below Engine's own SCHED_RR 45-49 audio threads, or it starves them.
 
+For what it is worth, the device's own device tree says how fast the real unit runs: the CPU up
+to 1608 MHz on demand, the GPU pinned at 400 MHz (its table ends there), and no passive thermal
+trip at all, only a critical one at 113 C. The launcher tops the GPU at 400 like the device; the
+CPU cap is the bare board's problem, not Engine's.
+
 Two things the board taught: Wi-Fi works only with ConnMan and wpa_supplicant started in the
 chroot (Engine talks to `net.connman`, nothing else), and an RK3288 with no heatsink powers
 itself off on temperature within the hour if the GPU is pinned to `performance` as the real

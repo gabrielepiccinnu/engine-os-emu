@@ -89,6 +89,10 @@ for v in /sys/class/vtconsole/*/; do case "$(cat $v/name)" in *frame*) echo 0 > 
 # kernel powers it off (HARDWARE PROTECTION shutdown). The default governor
 # stays, and GPU_PERFORMANCE=1 is there for a board that is cooled.
 [ -n "${GPU_PERFORMANCE:-}" ] && echo performance > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/governor 2>/dev/null
+# The device's own device tree tops the GPU at 400 MHz (four OPPs, 100 to
+# 400) and the CPU at 1608 MHz on demand; the Tinker Board offers 600 and
+# 1800. 400 is what Engine was tuned against, and cooler than 600.
+echo 400000000 > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/max_freq 2>/dev/null || true
 modprobe snd_seq_midi 2>/dev/null || true
 
 # 3a. the pointer. The RK3288 VOP in the mainline kernel has no cursor plane
