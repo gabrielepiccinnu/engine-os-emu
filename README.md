@@ -383,8 +383,11 @@ And it has sound. The virtual card's playback comes out again on a third card, `
 a capture returning the sixteen S32 channels Engine writes, clocked by the same hrtimer (the
 period in nanoseconds: truncated to microseconds it ran 0.006% fast, an underrun every five
 minutes). `_tools/board/az01-audio.sh` reads it, keeps channels 0/1, which carry the master
-mix (4/5 are the same 10 dB down, the rest silence), and plays them through `aplay` on the HDMI
-or a USB card with an 85 ms buffer. Three things had to be found out the hard way: Engine opens
+mix, and plays them through `aplay` on the HDMI or a USB card. Channels 2/3 are the
+headphones, what PFL selects (measured by moving PFL and the faders from the surface: they go
+silent with PFL off, the master does not), and 4/5 the booth, 10 dB down; `board.sh cue
+hw:Device` runs a second chain, the headphones out of the USB dongle, beside the master on the
+DAC, so the board has a real cue. Three things had to be found out the hard way: Engine opens
 every PCM of a card as `hw:<card>`, so the loop must be a card of its own or Engine reopens its
 own device and gives up; a late writer must still get its period interrupt, or Engine, which
 paces itself on it, waits for the clock and the clock for Engine; and whatever carries the
