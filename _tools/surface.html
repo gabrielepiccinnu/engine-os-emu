@@ -154,7 +154,7 @@
 <body>
 <header>
   <h1>NUMARK <span>MIXSTREAM PRO</span> · virtual surface</h1>
-  <div class="st">bridge: <b id="conn" class="off">connecting…</b> · out <span id="sent">0</span> B · LEDs: <b id="evconn" class="off">—</b></div>
+  <div class="st">bridge: <b id="conn" class="off">connecting…</b> · out <span id="sent">0</span> B · LEDs: <b id="evconn" class="off">—</b> · <b id="board" class="off">board: —</b></div>
 </header>
 
 <div class="screenwrap" id="screenwrap">
@@ -255,6 +255,19 @@ listen();
   const up = () => { if (!down) return; down = false; sc.classList.remove('down'); send('u'); };
   sc.addEventListener('pointerup', up); sc.addEventListener('pointercancel', up);
   img.addEventListener('error', () => setTimeout(() => { img.src = c.mirror.split('?')[0] + '?' + Date.now(); }, 1500));
+})();
+
+// the board's temperature, clock and CPU use, from /stats every 3 s
+(function () {
+  const el = document.getElementById('board'); if (!el) return;
+  const tick = async () => {
+    try { const s = await (await fetch('/stats')).json();
+      if (s.error) { el.textContent = 'board: ' + s.error; el.className = 'off'; }
+      else { el.textContent = s.temp + ' °C · ' + s.mhz + ' MHz · CPU ' + s.cpu + '% · load ' + s.load;
+        el.className = s.temp >= 80 ? 'off' : ''; }
+    } catch (e) { el.textContent = 'board: —'; el.className = 'off'; }
+  };
+  tick(); setInterval(tick, 3000);
 })();
 
 // ---------------------------------------------------------------- the map (NH08_Controller_Assignments.qml)

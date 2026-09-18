@@ -32,7 +32,7 @@
 <body>
 <header>
   <h1>ENGINE OS <span>ON THE BOARD</span> · remote</h1>
-  <div class="st">touch: <b id="conn" class="off">connecting…</b> · <span id="size">—</span> · <span id="last">—</span></div>
+  <div class="st">touch: <b id="conn" class="off">connecting…</b> · <span id="size">—</span> · <span id="last">—</span> · <b id="board">board: —</b></div>
 </header>
 <main>
   <div class="screen" id="screen"><img id="img" alt="the board's display"><div class="finger" id="finger"></div></div>
@@ -81,6 +81,19 @@ const up = ev => { if (!down) return; down = false; screen_.classList.remove('do
 screen_.addEventListener('pointerup', up); screen_.addEventListener('pointercancel', up);
 // the stream drops when ffmpeg restarts: reload the picture
 img.addEventListener('error', () => setTimeout(() => { img.src = img.src.split('?')[0] + '?' + Date.now(); }, 1500));
+
+// the board's temperature, clock and CPU use, from /stats every 3 s
+(function () {
+  const el = document.getElementById('board'); if (!el) return;
+  const tick = async () => {
+    try { const s = await (await fetch('/stats')).json();
+      if (s.error) { el.textContent = 'board: ' + s.error; el.className = 'off'; }
+      else { el.textContent = s.temp + ' °C · ' + s.mhz + ' MHz · CPU ' + s.cpu + '% · load ' + s.load;
+        el.className = s.temp >= 80 ? 'off' : ''; }
+    } catch (e) { el.textContent = 'board: —'; el.className = 'off'; }
+  };
+  tick(); setInterval(tick, 3000);
+})();
 </script>
 </body>
 </html>

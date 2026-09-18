@@ -120,6 +120,51 @@ class Frames(threading.Thread):
 frames = Frames()
 
 
+class Stats(threading.Thread):
+    """The board's temperature, clock and CPU use: one ssh session in which
+    the board prints a line every few seconds, so that the page can show them
+    without a new ssh per look. CPU use is /proc/stat's first line differenced
+    between two prints, as top does."""
+
+    LOOP = ("while :; do echo $(cat /sys/class/thermal/thermal_zone0/temp) "
+            "$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq) "
+            "$(cut -d' ' -f1 /proc/loadavg) $(head -n1 /proc/stat); sleep 3; done")
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.temp, self.mhz, self.load, self.cpu, self.error = 0, 0, 0.0, 0, "not started"
+        self.busy_idle = None
+
+    def run(self):
+        while True:
+            try:
+                proc = subprocess.Popen(SSH + [self.LOOP], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        stdin=subprocess.DEVNULL, text=True)
+                for line in proc.stdout:
+                    f = line.split()
+                    if len(f) < 8 or f[3] != "cpu":
+                        continue
+                    self.temp, self.mhz, self.load = int(f[0]) // 1000, int(f[1]) // 1000, float(f[2])
+                    t = [int(x) for x in f[4:]]
+                    idle, total = t[3] + t[4], sum(t)
+                    if self.busy_idle:
+                        di, dt = idle - self.busy_idle[0], total - self.busy_idle[1]
+                        self.cpu = int(round(100 * (1 - di / dt))) if dt > 0 else 0
+                    self.busy_idle, self.error = (idle, total), ""
+                proc.wait()
+                self.error = "ssh exited"
+            except Exception as e:
+                self.error = str(e)
+            time.sleep(5)
+
+    def json(self):
+        return '{"temp": %d, "mhz": %d, "load": %.2f, "cpu": %d, "error": "%s"}' % (
+            self.temp, self.mhz, self.load, self.cpu, self.error.replace('"', "'"))
+
+
+stats = Stats()
+
+
 def screen_size():
     """The mode Engine set: what the launcher wrote to /run/az01/mode, or
     failing that the connector's preferred one. fb0 still reports the
@@ -164,6 +209,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         % (SIZE[0], SIZE[1], "true" if ok else "false", fifo.error.replace('"', "'"),
                            (frames.error or "live").replace('"', "'")),
                         "application/json")
+        elif self.path == "/stats":
+            self._reply(200, stats.json(), "application/json")
         elif self.path.startswith("/stream"):
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -197,6 +244,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     frames.start()
+    stats.start()
     server = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
     url = "http://%s:%d/" % (HOST, PORT)
     print("remote desktop: %s   (board %s, mirror %s)" % (url, BOARD, MIRROR))

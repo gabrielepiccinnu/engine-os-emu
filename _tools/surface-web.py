@@ -228,7 +228,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         % ("true" if ok else "false", pipe.sent,
                            '"%s"' % pipe.error.replace('"', "'"), "board" if BOARD else "qemu"),
                         "application/json")
-        elif remote and (self.path == "/config" or self.path.startswith("/stream")):
+        elif remote and (self.path in ("/config", "/stats") or self.path.startswith("/stream")):
             remote.Handler.do_GET(self)          # the board's display: same handlers, same server
         else:
             self._reply(404, "not found")
@@ -262,6 +262,7 @@ def main():
         os.chmod(KEY, 0o600)
     else:
         remote.frames.start()
+        remote.stats.start()
         print("target: the Tinker Board, with its display on the page")
 
     if pipe.open():

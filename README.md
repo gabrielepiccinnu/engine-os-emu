@@ -420,8 +420,12 @@ itself off on temperature within the hour if the GPU is pinned to `performance` 
 unit does, so the launcher does not, and `board.sh temp` is worth a look.
 
 `az01-mirror.sh` is the remote view: ffmpeg's `kmsgrab` reads the buffer the display is
-scanning out and serves it as MJPEG over HTTP, 8 fps at 960 px wide on this CPU, to any browser
-on the cable. The board has no DHCP on that link, so the Mac reaches it by IPv6 link-local for
+scanning out and serves it as MJPEG over HTTP, 5 fps at 640 px wide, to any browser on the
+cable. It costs a core (the copy out of the scanout buffer, uncached memory, more than the
+encode) and it runs `SCHED_IDLE`: with Engine decoding a Bluetooth stream on top of it the audio
+chains underran twenty times a minute, with the mirror taking only what nothing else wants,
+once. The pages show the board's temperature, clock and CPU use in their header, from one ssh
+session in which the board prints them every three seconds. The board has no DHCP on that link, so the Mac reaches it by IPv6 link-local for
 ssh and the script gives it an IPv4 link-local address for the browser.
 
 ## What will never work under emulation
