@@ -30,13 +30,13 @@ case "${1:-}" in
     "")      exec ssh $O "root@$H" ;;
     cp)      exec scp -q $O "$2" "root@[$H]:$3" ;;
     get)     exec scp -q $O "root@[$H]:$2" "$3" ;;
-    install) scp -q $O "$D/az01-run.sh" "$D/az01-mirror.sh" "$D/az01-cool.sh" "$D/az01-audio.sh" "$D/az01-bt-reset.sh" "root@[$H]:/root/"
+    install) scp -q $O "$D/az01-run.sh" "$D/az01-mirror.sh" "$D/az01-cool.sh" "$D/az01-audio.sh" "$D/az01-bt-reset.sh" "$D/az01-hifiberry-dtb.sh" "root@[$H]:/root/"
              # the touch bridge, built static in the container: docker exec engine-os-emu \
              #   arm-linux-gnueabihf-gcc -O2 -w -static -o /work/_vm/uinput-touch-static /work/_tools/uinput-touch.c
              # copied alongside and renamed: the running one is busy (ETXTBSY)
              [ -f "$D/../../_vm/uinput-touch-static" ] && scp -q $O "$D/../../_vm/uinput-touch-static" "root@[$H]:/root/uinput-touch.new"
              [ -f "$D/../../_vm/snd-combined-board.ko" ] && scp -q $O "$D/../../_vm/snd-combined-board.ko" "root@[$H]:/root/snd-combined.ko"
-             ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/az01-cool.sh /root/az01-audio.sh /root/az01-bt-reset.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
+             ssh $O "root@$H" '[ -f /root/uinput-touch.new ] && mv -f /root/uinput-touch.new /root/uinput-touch; chmod +x /root/az01-run.sh /root/az01-mirror.sh /root/az01-cool.sh /root/az01-audio.sh /root/az01-bt-reset.sh /root/az01-hifiberry-dtb.sh /root/uinput-touch 2>/dev/null'; echo installed ;;
     start)   ssh $O "root@$H" "PERIOD_MIN=${PERIOD_MIN:-0} bash /root/az01-run.sh && bash /root/az01-mirror.sh && bash /root/az01-cool.sh && (sleep 45; OUT=${AUDIO_OUT:-hw:HDMI} bash /root/az01-audio.sh) > /dev/null 2>&1 &" ;;
     stop)    ssh $O "root@$H" 'bash /root/az01-cool.sh stop; bash /root/az01-audio.sh stop; bash /root/az01-run.sh stop; bash /root/az01-mirror.sh stop' ;;
     # everything down, the chroot's daemons included, then a reboot: with
