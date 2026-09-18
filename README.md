@@ -390,16 +390,21 @@ own device and gives up; a late writer must still get its period interrupt, or E
 paces itself on it, waits for the clock and the clock for Engine; and whatever carries the
 audio out must run below Engine's own SCHED_RR 45-49 audio threads, or it starves them.
 
-A HiFiBerry DAC (the PCM5102A one) on the 40-pin header is the better output. Its pins are
-the Raspberry Pi's, and on the Tinker Board those carry I2S0, the same controller that feeds the
-HDMI audio; one controller, one card, so the HDMI card has to make way. An overlay cannot say
-so: the HDMI card's node is `/sound`, which libfdt resolves to `sound@ff8b0000` (the SPDIF)
-first, and the node has no label to target instead. `_tools/board/az01-hifiberry-dtb.sh`
-decompiles the stock device tree, disables the HDMI card, adds the DAC (the kernel's generic
-`linux,spdif-dit` transmitter, since a PCM5102A needs no driver and Armbian has none) with a
-`simple-audio-card` of its own on the I2S, compiles the result next to the stock DTB and sets
-`fdtfile` in `armbianEnv.txt`. After a reboot the card is `hw:HiFiBerry`, S16 to S32 at
-8-192 kHz, and `AUDIO_OUT=hw:HiFiBerry board.sh start` sends the master there.
+A HiFiBerry DAC+ on the 40-pin header is the better output: a PCM5122, 32 bits, line level,
+no USB in the way. Its pins are the Raspberry Pi's, and on the Tinker Board those carry I2S0,
+the same controller that feeds the HDMI audio; one controller, one card, so the HDMI card has
+to make way. An overlay cannot say so: the HDMI card's node is `/sound`, which libfdt resolves
+to `sound@ff8b0000` (the SPDIF) first, and the node has no label to target instead.
+`_tools/board/az01-hifiberry-dtb.sh` decompiles the stock device tree, disables the HDMI card,
+enables I2C1 (header pins 3/5) with the PCM5122 at `0x4d` on it and a `simple-audio-card` of
+its own on the I2S, compiles the result next to the stock DTB and sets `fdtfile` in
+`armbianEnv.txt`. Armbian's kernel does not carry the codec driver, so
+`_tools/board/pcm512x-board-build.sh` builds it from the kernel's own sources, the two upstream
+modules folded into one (`board-kbuild.sh` has no real modpost, so one module could not
+resolve another's exports), and the launcher loads it when the DAC is in the device tree. After
+a reboot the card is `hw:HiFiBerry`, with the chip's own volume and mute in `amixer`, and
+`AUDIO_OUT=hw:HiFiBerry board.sh start` sends the master there as S32. For the plain DAC
+(PCM5102A, no I2C) `az01-hifiberry-dtb.sh dac` uses the kernel's generic transmitter instead.
 
 For what it is worth, the device's own device tree says how fast the real unit runs: the CPU up
 to 1608 MHz on demand, the GPU pinned at 400 MHz (its table ends there), and no passive thermal

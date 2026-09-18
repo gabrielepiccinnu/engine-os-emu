@@ -31,6 +31,7 @@ case "${1:-}" in
     cp)      exec scp -q $O "$2" "root@[$H]:$3" ;;
     get)     exec scp -q $O "root@[$H]:$2" "$3" ;;
     install) scp -q $O "$D/az01-run.sh" "$D/az01-mirror.sh" "$D/az01-cool.sh" "$D/az01-audio.sh" "$D/az01-bt-reset.sh" "$D/az01-hifiberry-dtb.sh" "root@[$H]:/root/"
+             [ -f "$D/../../_vm/snd-soc-pcm512x-i2c-board.ko" ] && scp -q $O "$D/../../_vm/snd-soc-pcm512x-i2c-board.ko" "root@[$H]:/root/snd-soc-pcm512x-i2c.ko"
              # the touch bridge, built static in the container: docker exec engine-os-emu \
              #   arm-linux-gnueabihf-gcc -O2 -w -static -o /work/_vm/uinput-touch-static /work/_tools/uinput-touch.c
              # copied alongside and renamed: the running one is busy (ETXTBSY)

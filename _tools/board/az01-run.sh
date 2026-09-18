@@ -146,6 +146,16 @@ if [ -f /root/snd-combined.ko ] && ! grep -q Surface /proc/asound/cards 2>/dev/n
         || echo "WARNING: snd-combined.ko did not load"
 fi
 
+# 3d. the HiFiBerry DAC+, when az01-hifiberry-dtb.sh put it in the device
+#     tree: its PCM5122 codec driver is not in Armbian's kernel, so the one
+#     pcm512x-board-build.sh built is loaded here (no modpost, no DT alias,
+#     so nothing loads it on its own) and the "HiFiBerry" card appears
+if [ -f /root/snd-soc-pcm512x-i2c.ko ] && [ -d /proc/device-tree/i2c@ff140000/pcm5122@4d ] \
+   && ! grep -q HiFiBerry /proc/asound/cards 2>/dev/null; then
+    modprobe snd-soc-core 2>/dev/null || true
+    insmod /root/snd-soc-pcm512x-i2c.ko && echo "HiFiBerry DAC+ codec loaded" || echo "WARNING: pcm512x did not load"
+fi
+
 # 3b. the touchscreen. Engine's interface answers touch, not mouse clicks,
 #     so the bridge from _tools/uinput-touch.c turns the USB mouse into one
 #     (relative movement integrated, left button = finger). It must exist
